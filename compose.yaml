@@ -46,6 +46,16 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  telegram:
+    profiles: ["telegram"]
+    build: ./api
+    env_file: .env
+    command: ["python", "-m", "app.telegram_bot"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   web:
     build: ./web
     environment:
