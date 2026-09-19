@@ -1,3 +1,5 @@
+import type { ChatMessage } from "./api";
+
 export type Language = "ru" | "en";
 
 export function isLanguage(value: string): value is Language {
@@ -49,6 +51,9 @@ export const copy = {
     demoAnswer: "Поиск по документам · без ответа ИИ",
     insufficient: "Недостаточно сведений",
     indexUnavailable: "Индекс недоступен",
+    demoText: "Демо-режим: ИИ-ответ не формируется. Ниже приведены найденные выдержки.",
+    insufficientText: "Недостаточно информации в базе знаний для ответа на вопрос.",
+    indexUnavailableText: "Индекс документов недоступен для текущей конфигурации.",
     sources: "Источники",
     excerpt: "Показать выдержку",
     deletedSource: "Документ удалён; выдержка больше недоступна.",
@@ -164,6 +169,9 @@ export const copy = {
     demoAnswer: "Document search · no AI answer",
     insufficient: "Not enough information",
     indexUnavailable: "Index unavailable",
+    demoText: "Demo mode: no AI answer is generated. Matching excerpts are shown below.",
+    insufficientText: "The knowledge base does not contain enough information to answer this question.",
+    indexUnavailableText: "The document index is unavailable for the current configuration.",
     sources: "Sources",
     excerpt: "Show excerpt",
     deletedSource: "Document deleted; the excerpt is no longer available.",
@@ -237,6 +245,14 @@ export const copy = {
   },
 } as const;
 
+export function messageText(message: Pick<ChatMessage, "kind" | "text">, lang: Language): string {
+  const t = copy[lang];
+  if (message.kind === "demo") return t.demoText;
+  if (message.kind === "insufficient") return t.insufficientText;
+  if (message.kind === "index_unavailable") return t.indexUnavailableText;
+  return message.text;
+}
+
 export function messageForError(error: unknown, lang: Language): string {
   const t = copy[lang];
   const status = typeof error === "object" && error !== null && "status" in error ? error.status : undefined;
@@ -257,4 +273,28 @@ export function messageForUploadError(error: unknown, lang: Language, file: File
   if (status === 415) return /\.pdf$/i.test(file.name) ? t.invalidPdf : t.invalidTextFile;
   if (status === 422) return file.size === 0 ? t.emptyFile : t.invalidFileName;
   return messageForError(error, lang);
+}
+
+const documentErrorsEn = new Map<string, string>([
+  ["Не удалось прочитать PDF: файл повреждён или защищён", "Could not read the PDF. It may be damaged or password protected."],
+  ["PDF не содержит извлекаемого текста; сканы без текстового слоя не поддерживаются", "The PDF has no extractable text. Scans without a text layer are unsupported."],
+  ["Текстовый файл должен быть в кодировке UTF-8", "The text file must use UTF-8 encoding."],
+  ["Документ не содержит текста для индексирования", "The document contains no text to index."],
+  ["Превышено время ожидания API embeddings", "The embeddings API timed out."],
+  ["Не удалось связаться с API embeddings", "Could not connect to the embeddings API."],
+  ["API embeddings вернул некорректный JSON", "The embeddings API returned invalid JSON."],
+  ["API embeddings вернул некорректный ответ", "The embeddings API returned an invalid response."],
+  ["API embeddings вернул неверное число векторов", "The embeddings API returned the wrong number of vectors."],
+  ["API embeddings вернул некорректные индексы векторов", "The embeddings API returned invalid vector indices."],
+  ["API embeddings вернул неверную размерность", "The embeddings API returned a vector with an invalid dimension."],
+  ["Размерности embeddings различаются", "Embedding vector dimensions differ."],
+  ["Embedding содержит некорректные числа", "An embedding contains invalid numeric values."],
+  ["Внутренняя ошибка обработки документа", "An internal error occurred while processing the document."],
+]);
+
+export function messageForDocumentError(error: string, lang: Language): string {
+  if (lang === "ru") return error;
+  const httpStatus = /^API embeddings вернул HTTP (\d{3})$/.exec(error);
+  if (httpStatus) return `The embeddings API returned HTTP ${httpStatus[1]}.`;
+  return documentErrorsEn.get(error) ?? "Document processing failed. Retry indexing or check the server logs.";
 }

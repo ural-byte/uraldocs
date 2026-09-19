@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import { api, type Document, type UiConfig } from "@/lib/api";
-import { copy, messageForError, messageForUploadError, type Language } from "@/lib/i18n";
+import { copy, messageForDocumentError, messageForError, messageForUploadError, type Language } from "@/lib/i18n";
 
 function formatBytes(bytes: number) {
   return `${Math.round(bytes / 1024 / 1024)} MB`;
@@ -22,24 +22,29 @@ export default function Documents({ lang }: { lang: Language }) {
   const mounted = useRef(true);
   const listRequest = useRef<AbortController | null>(null);
 
-  const refresh = useCallback(async () => {
-    if (listRequest.current) return;
+  const refresh = useCallback(async (replaceInFlight = false) => {
+    if (listRequest.current) {
+      if (!replaceInFlight) return;
+      listRequest.current.abort();
+    }
     const controller = new AbortController();
     listRequest.current = controller;
     if (mounted.current) setRefreshing(true);
     try {
       const rows = await api.documents(controller.signal);
-      if (mounted.current) {
+      if (mounted.current && listRequest.current === controller && !controller.signal.aborted) {
         setDocuments(rows);
         setError("");
       }
     } catch (reason) {
-      if (mounted.current && !controller.signal.aborted) setError(messageForError(reason, lang));
+      if (mounted.current && listRequest.current === controller && !controller.signal.aborted) setError(messageForError(reason, lang));
     } finally {
-      if (listRequest.current === controller) listRequest.current = null;
-      if (mounted.current) {
-        setLoading(false);
-        setRefreshing(false);
+      if (listRequest.current === controller) {
+        listRequest.current = null;
+        if (mounted.current) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
     }
   }, [lang]);
@@ -92,7 +97,7 @@ export default function Documents({ lang }: { lang: Language }) {
       setFile(null);
       if (fileInput.current) fileInput.current.value = "";
       setNotice(t.operationDone);
-      await refresh();
+      await refresh(true);
     } catch (reason) {
       setError(messageForUploadError(reason, lang, file));
     } finally {
@@ -108,7 +113,7 @@ export default function Documents({ lang }: { lang: Language }) {
     try {
       await task();
       setNotice(t.operationDone);
-      await refresh();
+      await refresh(true);
     } catch (reason) {
       setError(messageForError(reason, lang));
     } finally {
@@ -144,7 +149,7 @@ export default function Documents({ lang }: { lang: Language }) {
                 <div className="file-glyph" aria-hidden="true">{item.file_type.toUpperCase()}</div>
                 <div className="document-copy"><h3>{item.filename}</h3><div className="document-meta"><span className={`status-chip ${item.status}`}>{item.status === "pending" ? t.pending : item.status === "ready" ? t.ready : t.failed}</span><span>{t.generation} {item.generation}</span><span>{item.index_current ? t.currentIndex : t.staleIndex}</span></div></div>
               </div>
-              {item.error && <details className="error-detail"><summary>{t.technicalDetail}</summary><p>{item.error}</p></details>}
+              {item.error && <details className="error-detail"><summary>{t.technicalDetail}</summary><p>{messageForDocumentError(item.error, lang)}</p></details>}
               <div className="item-actions"><button className="button-link" disabled={busy || item.status === "pending"} onClick={() => void action(() => api.reindexDocument(item.id))}>{t.reindexOne}</button><button className="button-link danger" disabled={busy} onClick={() => void action(() => api.deleteDocument(item.id), t.confirmDeleteDocument)}>{t.deleteDocument}</button></div>
             </li>)}
           </ul>}

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useState } from "react";
 import { api, ApiError, type ChatMessage, type Conversation, type ConversationDetail, type Source, type UiConfig } from "@/lib/api";
-import { copy, messageForError, type Language } from "@/lib/i18n";
+import { copy, messageForError, messageText, type Language } from "@/lib/i18n";
 
 function answerParts(text: string, sources: Source[]) {
   return text.split(/(\[c\d+\])/g).map((part, index) => {
@@ -30,7 +30,7 @@ function MessageCard({ message, lang }: { message: ChatMessage; lang: Language }
     message.kind === "insufficient" ? t.insufficient : message.kind === "index_unavailable" ? t.indexUnavailable : t.aiAnswer;
   return <article className={`message-card ${message.role} ${message.kind}`}>
     <div className="message-label"><span className="message-dot" aria-hidden="true" />{label}</div>
-    <p className="message-text">{message.kind === "answer" ? answerParts(message.text, message.sources) : message.text}</p>
+    <p className="message-text">{message.kind === "answer" ? answerParts(message.text, message.sources) : messageText(message, lang)}</p>
     {message.sources.length > 0 && <section className="sources-block" aria-label={t.sources}>
       <h3>{t.sources} <span>{message.sources.length}</span></h3>
       <ul className="source-list">{message.sources.map((source) => <SourceCard source={source} lang={lang} key={source.id} />)}</ul>
