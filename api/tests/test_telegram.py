@@ -137,6 +137,7 @@ def test_provider_failure_has_no_pair_or_demo_fallback(database, monkeypatch):
     ("What is alpha?", "ru", "en"),
     ("Does UralDocs support PDF import?", "ru", "en"),
     ("Is PDF supported?", "ru", "en"),
+    ("Are PDFs supported?", "ru", "en"),
     ("How can I import a document?", "ru", "en"),
     ("How come PDF import fails?", "ru", "en"),
     ("How do I comment on a PDF?", "ru", "en"),
@@ -158,6 +159,8 @@ def test_provider_failure_has_no_pair_or_demo_fallback(database, monkeypatch):
     ("Какво е документ?", "en", "other"),
     ("Как се качва документ?", "en", "other"),
     ("Како ради увоз докумената?", "en", "other"),
+    ("Моля, покажете документа", "en", "other"),
+    ("Молим вас, прикажите документ", "en", "other"),
     ("Да ли могу да увезем документ?", "en", "other"),
     ("document", "en", "other"),
     ("hi", "en", "other"),
@@ -190,6 +193,7 @@ def test_foreign_questions_do_not_reach_kb_or_history(database, monkeypatch):
         "Hoe maak ik een document?", "Come funziona importazione PDF?",
         "Necesito importar un documento PDF", "Какво е документ?", "Как се качва документ?",
         "Како ради увоз докумената?", "Да ли могу да увезем документ?",
+        "Моля, покажете документа", "Молим вас, прикажите документ",
         "document", "hi", "will",
     ]
     api = FakeTelegram([update(number, text=question, profile="en") for number, question in enumerate(questions, 1)])
@@ -222,6 +226,23 @@ def test_question_language_overrides_profile_and_short_query_uses_it(database, m
     assert api.sent[-1] == (101, bot.PROFILE_UNKNOWN)
     assert bot.read_offset(database) == 6
     assert len(bot.read_history(database, 101)) == 3
+
+
+def test_ordinary_english_questions_reach_answer_service(database, monkeypatch):
+    observed = []
+
+    def answer(_factory, question, _history, _config, *, language):
+        observed.append((question, language))
+        return AnswerResult("insufficient", "Not enough information")
+
+    monkeypatch.setattr(bot, "generate_answer", answer)
+    questions = ["Is PDF supported?", "How do I comment on a PDF?"]
+    api = FakeTelegram([update(number, text=question, profile="ru") for number, question in enumerate(questions, 1)])
+    bot.run_once(api, {101}, database, config())
+
+    assert observed == [(question, "en") for question in questions]
+    assert bot.read_offset(database) == 3
+    assert len(bot.read_history(database, 101)) == 2
 
 
 def test_real_answer_sources_exclude_excerpt():

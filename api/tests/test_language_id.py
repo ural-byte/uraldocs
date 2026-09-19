@@ -21,19 +21,43 @@ class FakeModel:
 
 @pytest.mark.parametrize("text,labels,probabilities,expected", [
     ("What documents support PDF?", ("__label__en", "__label__de"), (0.70, 0.20), "en"),
-    ("What documents support PDF?", ("__label__en", "__label__de"), (0.59, 0.01), "other"),
+    ("What documents support PDF?", ("__label__en", "__label__de"), (0.59, 0.01), "en"),
+    ("Is PDF supported?", ("__label__en", "__label__hu"), (0.38, 0.13), "en"),
+    ("Is PDF supported?", ("__label__en", "__label__hu"), (0.379, 0.01), "other"),
     ("What documents support PDF?", ("__label__en", "__label__de"), (0.80, 0.56), "other"),
     ("Что такое альфа?", ("__label__ru", "__label__uk"), (0.65, 0.30), "ru"),
+    ("Моля, покажете документа", ("__label__ru", "__label__bg"), (0.70, 0.10), "other"),
+    ("Молим вас, прикажите документ", ("__label__ru", "__label__sr"), (0.73, 0.10), "other"),
+    ("Что такое альфа?", ("__label__ru", "__label__uk"), (0.59, 0.01), "other"),
     ("Show me the PDF documents", ("__label__de", "__label__en"), (0.16, 0.15), "en"),
     ("Show me the PDF documents", ("__label__de", "__label__en"), (0.61, 0.02), "other"),
     ("Show documents", ("__label__de", "__label__en"), (0.16, 0.15), "other"),
 ])
-def test_probability_gate_and_narrow_imperative(monkeypatch, text, labels, probabilities, expected):
+def test_probability_gate_and_russian_construction(monkeypatch, text, labels, probabilities, expected):
     model = FakeModel(labels, probabilities)
     monkeypatch.setattr(language_id, "load_language_model", lambda: model)
 
     assert language_id.question_language(text) == expected
     assert model.calls == [(text, 2)]
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Что такое альфа?", True),
+    ("Какие документы доступны?", True),
+    ("Как загрузить PDF?", True),
+    ("Где мне найти документ?", True),
+    ("Можно ли импортировать документ?", True),
+    ("Поддерживает ли Уралдокс импорт PDF?", True),
+    ("Есть ли документы?", True),
+    ("Расскажи о документах", True),
+    ("О чём документ?", True),
+    ("Моля, покажете документа", False),
+    ("Молим вас, прикажите документ", False),
+    ("Да ли могу да увезем документ?", False),
+])
+def test_russian_grammar_families(text, expected):
+    words = language_id.re.findall(r"[^\W_]+", text.casefold())
+    assert language_id._russian_construction(words) is expected
 
 
 @pytest.mark.parametrize("text,expected", [
