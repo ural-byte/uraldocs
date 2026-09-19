@@ -3,6 +3,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import httpx
 from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -12,10 +13,56 @@ from app.kb import ExtractedChunk, config_signature, extract_chunks, validate_em
 from app.models import Document, DocumentChunk
 
 logger = logging.getLogger("uraldocs.worker")
+EMBEDDINGS_BATCH_SIZE = 64
 
 
-def create_embeddings(_chunks: list[ExtractedChunk], _config: Settings) -> list[list[float]]:
-    raise ValueError("Сервис embeddings недоступен")
+def _request_embeddings(client: httpx.Client, chunks: list[ExtractedChunk], config: Settings) -> list[list[float]]:
+    try:
+        response = client.post(
+            f"{config.ai_base_url.rstrip('/')}/embeddings",
+            headers={"Authorization": f"Bearer {config.ai_api_key}"},
+            json={"model": config.ai_embedding_model, "input": [chunk.text for chunk in chunks]},
+        )
+    except httpx.TimeoutException as exc:
+        raise ValueError("Превышено время ожидания API embeddings") from exc
+    except (httpx.RequestError, httpx.InvalidURL) as exc:
+        raise ValueError("Не удалось связаться с API embeddings") from exc
+
+    if response.status_code != 200:
+        raise ValueError(f"API embeddings вернул HTTP {response.status_code}")
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ValueError("API embeddings вернул некорректный JSON") from exc
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        raise ValueError("API embeddings вернул некорректный ответ")
+    data = payload["data"]
+    if len(data) != len(chunks):
+        raise ValueError("API embeddings вернул неверное число векторов")
+    vectors_by_index: dict[int, list[float]] = {}
+    for item in data:
+        if not isinstance(item, dict):
+            raise ValueError("API embeddings вернул некорректный ответ")
+        index = item.get("index")
+        if type(index) is not int or not 0 <= index < len(chunks) or index in vectors_by_index:
+            raise ValueError("API embeddings вернул некорректные индексы векторов")
+        embedding = item.get("embedding")
+        if not isinstance(embedding, list):
+            raise ValueError("API embeddings вернул некорректный ответ")
+        vectors_by_index[index] = embedding
+    return validate_embeddings([vectors_by_index[index] for index in range(len(chunks))], len(chunks))
+
+
+def create_embeddings(chunks: list[ExtractedChunk], config: Settings) -> list[list[float]]:
+    vectors: list[list[float]] = []
+    with httpx.Client(timeout=config.ai_timeout_seconds, follow_redirects=False, trust_env=False) as client:
+        for start in range(0, len(chunks), EMBEDDINGS_BATCH_SIZE):
+            batch_vectors = _request_embeddings(client, chunks[start:start + EMBEDDINGS_BATCH_SIZE], config)
+            if vectors and len(batch_vectors[0]) != len(vectors[0]):
+                raise ValueError("Размерности embeddings различаются")
+            vectors.extend(batch_vectors)
+    return vectors
 
 
 def process_one(factory: sessionmaker[Session] = SessionLocal, config: Settings = settings) -> bool:

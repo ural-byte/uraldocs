@@ -6,7 +6,7 @@ from typing import Annotated
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session as DatabaseSession, defer
 from starlette.responses import JSONResponse
@@ -32,6 +32,7 @@ logger = logging.getLogger("uraldocs.api")
 app = FastAPI(title="UralDocs API")
 Db = Annotated[DatabaseSession, Depends(get_db)]
 AUTH_BODY_LIMIT = 16 * 1024
+REINDEX_BATCH_SIZE = 100
 AUTH_BODY_LIMIT_PATHS = frozenset({"/auth/login", "/auth/logout", "/admin/users"})
 AUTH_BODY_LIMIT_USER_ACTION = re.compile(r"^/admin/users/[^/]+/(?:disable|reset-password)$")
 
@@ -301,7 +302,7 @@ async def upload_document(_actor: AdminUser, db: Db, file: UploadFile = File()):
     document = Document(filename=filename, file_type=file_type, original=original, status="pending", generation=1)
     db.add(document)
     db.commit()
-    db.refresh(document)
+    db.refresh(document, attribute_names=["created_at", "updated_at"])
     return as_document_response(document)
 
 
@@ -312,7 +313,7 @@ def list_documents(_actor: AdminUser, db: Db):
 
 @app.get("/admin/documents/{document_id}", response_model=DocumentResponse)
 def document_status(document_id: int, _actor: AdminUser, db: Db):
-    document = db.get(Document, document_id)
+    document = db.get(Document, document_id, options=[defer(Document.original)])
     if document is None:
         raise HTTPException(status_code=404, detail="Документ не найден")
     return as_document_response(document)
@@ -320,7 +321,7 @@ def document_status(document_id: int, _actor: AdminUser, db: Db):
 
 @app.delete("/admin/documents/{document_id}", status_code=204)
 def delete_document(document_id: int, _actor: AdminUser, db: Db):
-    document = db.scalar(select(Document).where(Document.id == document_id).with_for_update())
+    document = db.scalar(select(Document).options(defer(Document.original)).where(Document.id == document_id).with_for_update())
     if document is None:
         raise HTTPException(status_code=404, detail="Документ не найден")
     db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document_id))
@@ -340,21 +341,46 @@ def queue_reindex(document: Document, db: DatabaseSession) -> None:
 
 @app.post("/admin/documents/{document_id}/reindex", response_model=DocumentResponse)
 def reindex_document(document_id: int, _actor: AdminUser, db: Db):
-    document = db.scalar(select(Document).where(Document.id == document_id).with_for_update())
+    document = db.scalar(select(Document).options(defer(Document.original)).where(Document.id == document_id).with_for_update())
     if document is None:
         raise HTTPException(status_code=404, detail="Документ не найден")
     if document.status == "pending":
         raise HTTPException(status_code=409, detail="Документ уже ожидает обработки")
     queue_reindex(document, db)
     db.commit()
-    db.refresh(document)
+    db.refresh(document, attribute_names=["updated_at"])
     return as_document_response(document)
 
 
 @app.post("/admin/documents/reindex", response_model=dict[str, int])
 def reindex_all_documents(_actor: AdminUser, db: Db):
-    documents = db.scalars(select(Document).order_by(Document.id).with_for_update()).all()
-    for document in documents:
-        queue_reindex(document, db)
+    last_id = 0
+    max_id = db.scalar(select(func.max(Document.id))) or 0
+    queued = 0
+    while True:
+        ids = db.scalars(
+            select(Document.id)
+            .where(Document.id > last_id, Document.id <= max_id)
+            .order_by(Document.id)
+            .limit(REINDEX_BATCH_SIZE)
+            .with_for_update()
+        ).all()
+        if not ids:
+            break
+        db.execute(
+            update(Document)
+            .where(Document.id.in_(ids))
+            .values(
+                generation=Document.generation + 1,
+                status="pending",
+                error=None,
+                config_signature=None,
+                lease_token=None,
+                lease_deadline=None,
+            )
+        )
+        db.execute(delete(DocumentChunk).where(DocumentChunk.document_id.in_(ids)))
+        last_id = ids[-1]
+        queued += len(ids)
     db.commit()
-    return {"queued": len(documents)}
+    return {"queued": queued}

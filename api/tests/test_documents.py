@@ -2,9 +2,9 @@ import io
 
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
-from sqlalchemy import select
+from sqlalchemy import event, select
 
-from app import worker
+from app import main as api_main, worker
 from app.config import Settings, settings
 from app.models import Document, DocumentChunk
 
@@ -57,6 +57,50 @@ def test_document_lifecycle(client, database, users):
     with database() as db:
         assert db.scalars(select(DocumentChunk)).all() == []
         assert db.scalars(select(Document)).all() == []
+
+
+def test_metadata_and_bulk_reindex_do_not_select_original(client, database, users, monkeypatch):
+    monkeypatch.setattr(api_main, "REINDEX_BATCH_SIZE", 2)
+    with database() as db:
+        documents = [
+            Document(filename=f"note-{index}.txt", file_type="txt", original=b"Content" * 100, status="ready", generation=1)
+            for index in range(5)
+        ]
+        db.add_all(documents)
+        db.flush()
+        ids = [document.id for document in documents]
+        db.add_all(
+            DocumentChunk(document_id=document.id, generation=1, chunk_index=0, text="Content", line_start=1, line_end=1)
+            for document in documents
+        )
+        db.commit()
+
+    login(client)
+    selects = []
+
+    def record_select(_connection, _cursor, statement, _parameters, _context, _executemany):
+        if statement.lstrip().upper().startswith("SELECT") and "documents" in statement.lower():
+            selects.append(statement)
+
+    engine = database.kw["bind"]
+    event.listen(engine, "before_cursor_execute", record_select)
+    try:
+        assert len(client.get("/admin/documents").json()) == 5
+        assert client.get(f"/admin/documents/{ids[0]}").status_code == 200
+        assert client.post(f"/admin/documents/{ids[0]}/reindex", headers=ORIGIN).json()["generation"] == 2
+        assert client.post("/admin/documents/reindex", headers=ORIGIN).json() == {"queued": 5}
+        assert client.delete(f"/admin/documents/{ids[-1]}", headers=ORIGIN).status_code == 204
+    finally:
+        event.remove(engine, "before_cursor_execute", record_select)
+
+    assert selects and all("original" not in statement.lower() for statement in selects)
+    batch_selects = [statement for statement in selects if "SELECT documents.id" in statement and "LIMIT" in statement]
+    assert len(batch_selects) == 4
+    with database() as db:
+        assert db.get(Document, ids[0]).generation == 3
+        assert all(db.get(Document, document_id).generation == 2 for document_id in ids[1:-1])
+        assert db.get(Document, ids[-1]) is None
+        assert db.scalars(select(DocumentChunk)).all() == []
 
 
 def test_invalid_upload_and_limit(client, users, monkeypatch):
@@ -167,6 +211,11 @@ def test_real_ai_requires_embeddings_and_never_falls_back(database, monkeypatch)
         db.add(doc)
         db.commit()
         first_id = doc.id
+
+    def unavailable(_chunks, _config):
+        raise ValueError("Сервис embeddings недоступен")
+
+    monkeypatch.setattr(worker, "create_embeddings", unavailable)
     assert worker.process_one(database, config)
     with database() as db:
         assert db.get(Document, first_id).status == "failed"

@@ -1,4 +1,9 @@
+import json
 import os
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
+from types import SimpleNamespace
 
 os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite://")
 
@@ -12,6 +17,44 @@ from app.db import get_db
 from app.main import app
 from app.models import Base, User
 from app.security import hash_password
+
+
+@pytest.fixture
+def embeddings_server():
+    state = SimpleNamespace(requests=[], status=200, payload={}, delay=0.0)
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            state.requests.append((self.path, self.headers.get("Authorization"), json.loads(body)))
+            if state.delay:
+                time.sleep(state.delay)
+            payload = state.payload
+            if callable(payload):
+                payload = payload(state.requests[-1][2])
+            data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+            self.send_response(state.status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except BrokenPipeError:
+                pass
+
+        def log_message(self, _format, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state.base_url = f"http://127.0.0.1:{server.server_port}/v1"
+    try:
+        yield state
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        server.server_close()
 
 
 @pytest.fixture

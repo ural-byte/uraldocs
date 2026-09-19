@@ -8,6 +8,8 @@ from pypdf import PdfReader
 
 from app.config import Settings
 
+MAX_FLOAT32 = 3.4028234663852886e38
+
 
 @dataclass(frozen=True)
 class ExtractedChunk:
@@ -27,15 +29,18 @@ def config_signature(config: Settings) -> str:
 def _split_text(text: str, limit: int = 1200) -> list[str]:
     text = re.sub(r"\s+", " ", text).strip()
     pieces = []
-    while text:
-        if len(text) <= limit:
-            pieces.append(text)
+    start = 0
+    while start < len(text):
+        if len(text) - start <= limit:
+            pieces.append(text[start:])
             break
-        cut = text.rfind(" ", 0, limit + 1)
-        if cut < limit // 2:
-            cut = limit
-        pieces.append(text[:cut].strip())
-        text = text[cut:].strip()
+        cut = text.rfind(" ", start, start + limit + 1)
+        if cut < start + limit // 2:
+            cut = start + limit
+        pieces.append(text[start:cut].strip())
+        start = cut
+        while start < len(text) and text[start] == " ":
+            start += 1
     return pieces
 
 
@@ -60,22 +65,35 @@ def extract_chunks(original: bytes, file_type: str) -> list[ExtractedChunk]:
         raise ValueError("Текстовый файл должен быть в кодировке UTF-8") from exc
     chunks: list[ExtractedChunk] = []
     buffer: list[str] = []
-    start = 1
+    buffer_length = 0
+    start = 0
+    end = 0
 
-    def flush(end: int) -> None:
+    def flush() -> None:
+        nonlocal buffer_length
         if buffer:
-            for part in _split_text("\n".join(buffer)):
-                chunks.append(ExtractedChunk(part, line_start=start, line_end=end))
+            chunks.append(ExtractedChunk(" ".join(buffer), line_start=start, line_end=end))
             buffer.clear()
+            buffer_length = 0
 
     for number, line in enumerate(lines, start=1):
-        if buffer and sum(len(value) for value in buffer) + len(line) > 1200:
-            flush(number - 1)
-            start = number
+        normalized = re.sub(r"\s+", " ", line).strip()
+        if not normalized:
+            continue
+        if len(normalized) > 1200:
+            flush()
+            chunks.extend(ExtractedChunk(part, line_start=number, line_end=number) for part in _split_text(normalized))
+            continue
+        if buffer and buffer_length + 1 + len(normalized) > 1200:
+            flush()
         if not buffer:
             start = number
-        buffer.append(line)
-    flush(len(lines))
+        else:
+            buffer_length += 1
+        buffer.append(normalized)
+        buffer_length += len(normalized)
+        end = number
+    flush()
     if not chunks:
         raise ValueError("Документ не содержит текста для индексирования")
     return chunks
@@ -90,6 +108,6 @@ def validate_embeddings(vectors: list[list[float]], expected_count: int) -> list
     for vector in vectors:
         if not isinstance(vector, list) or len(vector) != dimension:
             raise ValueError("Размерности embeddings различаются")
-        if any(type(value) not in (float, int) or not math.isfinite(value) for value in vector):
+        if any(type(value) not in (float, int) or abs(value) > MAX_FLOAT32 or not math.isfinite(value) for value in vector):
             raise ValueError("Embedding содержит некорректные числа")
     return vectors

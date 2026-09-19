@@ -9,6 +9,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app import worker
+from app.config import Settings
 from app.models import Base, Document, DocumentChunk
 
 
@@ -49,6 +50,34 @@ def test_expired_lease_is_recovered(postgres_documents):
         chunks = db.scalars(select(DocumentChunk).where(DocumentChunk.document_id == document_id)).all()
         assert document.status == "ready" and document.lease_token is None
         assert len(chunks) == 1 and chunks[0].text == "Recovered"
+
+
+def test_real_ai_stores_embeddings_in_postgres(postgres_documents, embeddings_server):
+    embeddings_server.payload = {"data": [{"index": 0, "embedding": [0.1, 0.2]}]}
+    config = Settings(
+        database_url="sqlite+pysqlite://",
+        kb_mode="real_ai",
+        ai_base_url=embeddings_server.base_url,
+        ai_api_key="private-test-key",
+        ai_embedding_model="test-model",
+    )
+    with postgres_documents() as db:
+        document = Document(filename="note.txt", file_type="txt", original=b"Evidence", status="pending", generation=1)
+        db.add(document)
+        db.commit()
+        document_id = document.id
+
+    assert worker.process_one(postgres_documents, config)
+
+    assert embeddings_server.requests == [
+        ("/v1/embeddings", "Bearer private-test-key", {"model": "test-model", "input": ["Evidence"]})
+    ]
+    with postgres_documents() as db:
+        document = db.get(Document, document_id)
+        chunk = db.scalar(select(DocumentChunk).where(DocumentChunk.document_id == document_id))
+        assert document.status == "ready" and document.error is None
+        assert chunk.text == "Evidence"
+        assert chunk.embedding == pytest.approx([0.1, 0.2])
 
 
 def test_claim_and_late_result_are_safe(postgres_documents, monkeypatch):
