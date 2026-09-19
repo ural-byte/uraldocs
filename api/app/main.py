@@ -124,6 +124,12 @@ class UserResponse(BaseModel):
     is_active: bool
 
 
+class UiConfigResponse(BaseModel):
+    kb_mode: str
+    max_upload_bytes: int
+    chat_max_question_chars: int
+
+
 class DocumentResponse(BaseModel):
     id: int
     filename: str
@@ -325,6 +331,15 @@ def logout(request: Request, response: Response, db: Db):
 @app.get("/auth/me", response_model=UserResponse)
 def me(user: CurrentUser):
     return as_user_response(user)
+
+
+@app.get("/ui/config", response_model=UiConfigResponse)
+def ui_config(_user: CurrentUser):
+    return UiConfigResponse(
+        kb_mode=settings.kb_mode,
+        max_upload_bytes=settings.max_upload_bytes,
+        chat_max_question_chars=settings.chat_max_question_chars,
+    )
 
 
 @app.post("/conversations", response_model=ConversationResponse, status_code=201)
