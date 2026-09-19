@@ -1,9 +1,7 @@
 """Последовательно доставляет ответы Telegram и хранит отдельную историю канала."""
 
 import logging
-import re
 import time
-import unicodedata
 from typing import Literal
 
 import httpx
@@ -13,22 +11,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.chat import AnswerResult, ChatError, HistoryPair, generate_answer
 from app.config import Settings, settings
 from app.db import SessionLocal
+from app.language_id import load_language_model, question_language
 from app.models import TelegramCursor, TelegramHistory
 
 logger = logging.getLogger("uraldocs.telegram")
 Language = Literal["ru", "en"]
 MAX_MESSAGE_CHARS = 3900
-TECHNICAL_TERMS = {"AI", "API", "CSV", "DOCX", "HTTP", "ID", "JSON", "KB", "MD", "PDF", "SQL", "TXT", "UI", "URL"}
-EN_AUXILIARIES = {"am", "are", "can", "could", "did", "do", "does", "has", "have", "is", "may", "should", "was", "were", "will", "would"}
-EN_PREDICATES = {
-    "allow", "allowed", "answer", "available", "contain", "contains", "create", "created",
-    "describe", "download", "exist", "exists", "explain", "find", "get", "have", "import",
-    "imported", "include", "includes", "know", "list", "open", "read", "search", "show",
-    "summarize", "support", "supported", "supports", "tell", "upload", "uploaded", "use",
-    "used", "work", "working", "works",
-}
-EN_IMPERATIVES = {"answer", "describe", "explain", "find", "list", "search", "show", "summarize", "tell"}
-RU_VERB_ENDINGS = ("ать", "ять", "ить", "еть", "овать", "нуть", "сти", "чь", "ает", "яет", "ует", "ет", "ит", "ют", "ут", "ется", "ится")
 LANGUAGE_BOUNDARY = "Поддерживаются вопросы на русском и английском. / Please ask in Russian or English."
 PROFILE_UNKNOWN = "Язык вопроса и профиля не определён. Напишите по-русски или по-английски. / Language unclear. Please ask in Russian or English."
 
@@ -42,62 +30,6 @@ def allowed_ids(config: Settings) -> set[int]:
     if not values or any(not value.isdecimal() or int(value) <= 0 for value in values):
         raise ValueError("Задайте TELEGRAM_ALLOWED_IDS как список положительных ID через запятую")
     return {int(value) for value in values}
-
-
-def _english_question(words: list[str]) -> bool:
-    if len(words) < 3:
-        return False
-    first, second = words[:2]
-    if first == "how" and second == "come":
-        return len(words) >= 4
-    if first in {"how", "where", "when", "why", "who"} and second in EN_AUXILIARIES:
-        return True
-    if first in {"what", "which"}:
-        return any(word in EN_AUXILIARIES for word in words[1:min(len(words) - 1, 5)])
-    if first == "please" and second in EN_IMPERATIVES:
-        return True
-    if first in EN_AUXILIARIES:
-        if second == "there" and len(words) >= 4:
-            return True
-        return any(word in EN_PREDICATES for word in words[2:5])
-    return False
-
-
-def _russian_predicate(word: str) -> bool:
-    return (len(word) >= 4 and word.endswith(RU_VERB_ENDINGS)) or word in {"есть", "находится", "расположен", "расположена"}
-
-
-def _russian_question(words: list[str]) -> bool:
-    if len(words) < 3:
-        return False
-    first, second = words[:2]
-    if first == "что" and second in {"такое", "за"}:
-        return True
-    if first in {"можно", "есть"} and second == "ли":
-        return first == "есть" or _russian_predicate(words[2])
-    if first in {"как", "где", "почему", "что"}:
-        position = 2 if second in {"мне", "нам", "не"} else 1
-        return position < len(words) and _russian_predicate(words[position])
-    return second == "ли" and _russian_predicate(first)
-
-
-def question_language(text: str) -> Literal["ru", "en", "other", "unclear"]:
-    words = re.findall(r"[^\W_]+", text.casefold(), re.UNICODE)
-    letters = [character for character in text if character.isalpha()]
-    if not letters:
-        return "unclear"
-    if len(words) == 1 and words[0].upper() in TECHNICAL_TERMS and words[0].upper() in text:
-        return "unclear"
-    if any(character in "іїєґўІЇЄҐЎ" for character in letters):
-        return "other"
-    kinds = [unicodedata.name(character, "").split(" ", 1)[0] for character in letters]
-    if any(kind not in {"LATIN", "CYRILLIC"} for kind in kinds):
-        return "other"
-    if any(ord(character) > 127 for character, kind in zip(letters, kinds) if kind == "LATIN"):
-        return "other"
-    if "CYRILLIC" in kinds:
-        return "ru" if _russian_question(words) else "other"
-    return "en" if _english_question(words) else "other"
 
 
 def profile_language(code: object) -> Language | None:
@@ -290,6 +222,7 @@ def main() -> None:
     if not settings.telegram_bot_token:
         raise ValueError("Задайте TELEGRAM_BOT_TOKEN для запуска Telegram-бота")
     allowed = allowed_ids(settings)
+    load_language_model()
     timeout = httpx.Timeout(settings.telegram_poll_timeout_seconds + 10)
     with httpx.Client(timeout=timeout, follow_redirects=False, trust_env=False) as client:
         api = TelegramApi(settings.telegram_bot_token, client)
