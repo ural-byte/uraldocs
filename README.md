@@ -1,93 +1,91 @@
-# Uraldocs
+# UralDocs
 
+Основа внутренней базы знаний: веб-приложение Next.js, API FastAPI и PostgreSQL с расширением pgvector. На этом этапе доступны вход, выход и управление учётными записями. Документы, поиск, чат и Telegram добавляются в следующих этапах.
 
+## Локальный запуск
 
-## Getting started
+Нужны Docker Engine и Docker Compose. Из корня репозитория:
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
-
-```
-cd existing_repo
-git remote add origin https://gitlab.com/uralbyte-group/uraldocs.git
-git branch -M main
-git push -uf origin main
+```sh
+cp .env.example .env
 ```
 
-## Integrate with your tools
+Задайте в `.env` собственный `POSTGRES_PASSWORD`. URL подключения к БД формируется из переменных `POSTGRES_*`; при внешней БД можно задать `DATABASE_URL` напрямую. Если меняете адрес веб-приложения, обновите `APP_ORIGIN`. Для локального HTTP оставьте `COOKIE_SECURE=false`; при HTTPS задайте `true`.
 
-* [Set up project integrations](https://gitlab.com/uralbyte-group/uraldocs/-/settings/integrations)
+```sh
+docker compose up --build -d
+docker compose ps
+curl http://localhost:8000/health/live
+curl http://localhost:8000/health/ready
+```
 
-## Collaborate with your team
+Сервис `migrate` применяет Alembic-миграции после готовности PostgreSQL. API запускается после успешной миграции, веб-приложение — после готовности API. `live` проверяет процесс API, `ready` выполняет запрос к БД. Веб-страницы: <http://localhost:3000/ru> и <http://localhost:3000/en>.
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+Создайте первого администратора и демонстрационного пользователя. Команда дважды запросит каждый пароль без вывода на экран; пароли длиной от 12 до 1024 символов. Если admin уже существует или логин занят, команда завершается ошибкой и ничего не перезаписывает.
 
-## Test and Deploy
+```sh
+docker compose run --rm -it api python -m app.cli bootstrap
+```
 
-Use the built-in continuous integration in GitLab.
+Логины по умолчанию — `admin` и `demo`. Их можно изменить: `bootstrap --admin <логин> --demo-user <логин>`. Фиксированных паролей нет. Пароли хранятся только как хеши Argon2id.
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+### Операторские команды
 
-***
+```sh
+docker compose run --rm -it api python -m app.cli create-admin <логин>
+docker compose run --rm -it api python -m app.cli reset-admin <логин>
+docker compose run --rm -it api python -m app.cli disable-admin <логин>
+```
 
-# Editing this README
+Пароли не передаются через аргументы командной строки или переменные окружения. `reset-admin` отзывает все сеансы администратора. Последнего активного администратора отключить нельзя. Сброс пароля не включает отключённую учётную запись.
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+## API и доступ
 
-## Suggestions for a good README
+Веб-приложение проксирует запросы `/api/*` к FastAPI через сервер Next.js. Браузер обращается к тому же origin, на котором открыта страница. Для изменения данных API требует заголовок `Origin`, точно совпадающий с `APP_ORIGIN`. Прямые вызовы API должны передавать его явно.
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+| Метод и путь | Назначение |
+| --- | --- |
+| `GET /health/live` | Процесс API работает |
+| `GET /health/ready` | БД доступна |
+| `POST /auth/login` | Вход, тело `{"username":"...","password":"..."}` |
+| `POST /auth/logout` | Выход и отзыв текущего сеанса |
+| `GET /auth/me` | Текущий пользователь |
+| `GET /admin/users` | Список пользователей роли `user` |
+| `POST /admin/users` | Создание пользователя `user` |
+| `POST /admin/users/{id}/disable` | Отключение пользователя |
+| `POST /admin/users/{id}/reset-password` | Установка нового постоянного пароля |
 
-## Name
-Choose a self-explaining name for your project.
+Административные методы доступны только роли `admin`. API управляет только учётными записями роли `user`: создание и изменение другого `admin`, отключение себя и сброс собственного пароля через API запрещены. Администраторов обслуживает оператор через CLI. При сбросе пароля администратор задаёт новый постоянный пароль в теле `{"password":"..."}` и передаёт его пользователю вне приложения. Обязательной смены при следующем входе нет.
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+Сеансы хранятся в БД по SHA-256 хешу случайного токена; браузер получает токен в cookie с `HttpOnly`, `SameSite=Lax` и настраиваемым `Secure`. На каждом запросе проверяются срок сеанса и состояние пользователя. Просроченный сеанс удаляется при обращении; при успешном входе удаляются все просроченные сеансы. Выход, отключение и сброс пароля отзывают сеансы. Настройка `SESSION_HOURS` задаёт срок сеанса.
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+## Разработка и проверки
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+Для backend нужен Python 3.12. Основные тесты используют временную SQLite-базу и не требуют запущенного Compose.
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+```sh
+cd api
+python3.12 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest -q
+```
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+Тесты блокировок в `api/tests/test_auth_postgres.py` запускаются при заданном `TEST_POSTGRES_URL`; без него pytest пропускает эти тесты. Для проверки всего backend suite на PostgreSQL из корня репозитория после настройки `.env` выполните:
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+```sh
+docker compose up -d --wait db
+docker compose run --rm --no-deps -v "$PWD/api:/app" api sh -c 'pip install -q -r requirements-dev.txt && TEST_POSTGRES_URL="$(python -c "from app.config import settings; print(settings.database_url)")" pytest -q'
+```
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+Для web нужен Node.js 22:
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+```sh
+cd web
+npm ci
+npm run lint
+npm run typecheck
+npm run build
+```
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
-
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
-
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
-
-## License
-For open source projects, say how it is licensed.
-
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Для остановки сервисов: `docker compose down`. Данные PostgreSQL сохраняются в томе `postgres_data`; команда `docker compose down -v` удаляет этот том.
