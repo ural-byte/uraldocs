@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Self
+from typing import Literal, Self
 from urllib.parse import quote
 
 from pydantic import Field, model_validator
@@ -19,6 +19,19 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     session_hours: int = Field(default=24, gt=0)
     log_level: str = "INFO"
+    kb_mode: Literal["demo", "real_ai"] = "demo"
+    ai_base_url: str = ""
+    ai_api_key: str = ""
+    ai_embedding_model: str = ""
+    ai_timeout_seconds: float = Field(default=30, gt=0)
+    worker_lease_seconds: int = Field(default=300, gt=0)
+    max_upload_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+
+    @model_validator(mode="after")
+    def validate_ai(self) -> Self:
+        if self.kb_mode == "real_ai" and not all((self.ai_base_url, self.ai_api_key, self.ai_embedding_model)):
+            raise ValueError("Для KB_MODE=real_ai задайте AI_BASE_URL, AI_API_KEY и AI_EMBEDDING_MODEL")
+        return self
 
     @model_validator(mode="after")
     def resolve_database_url(self) -> Self:

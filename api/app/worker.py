@@ -1,0 +1,97 @@
+import logging
+import time
+from datetime import datetime, timedelta, timezone
+from uuid import uuid4
+
+from sqlalchemy import delete, or_, select
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.config import Settings, settings
+from app.db import SessionLocal
+from app.kb import ExtractedChunk, config_signature, extract_chunks, validate_embeddings
+from app.models import Document, DocumentChunk
+
+logger = logging.getLogger("uraldocs.worker")
+
+
+def create_embeddings(_chunks: list[ExtractedChunk], _config: Settings) -> list[list[float]]:
+    raise ValueError("Сервис embeddings недоступен")
+
+
+def process_one(factory: sessionmaker[Session] = SessionLocal, config: Settings = settings) -> bool:
+    now = datetime.now(timezone.utc)
+    token = str(uuid4())
+    with factory() as db:
+        document = db.scalar(
+            select(Document)
+            .where(Document.status == "pending", or_(Document.lease_deadline.is_(None), Document.lease_deadline < now))
+            .order_by(Document.id)
+            .with_for_update(skip_locked=True)
+        )
+        if document is None:
+            return False
+        document.lease_token = token
+        document.lease_deadline = now + timedelta(seconds=config.worker_lease_seconds)
+        document_id = document.id
+        generation = document.generation
+        original = document.original
+        file_type = document.file_type
+        db.commit()
+
+    chunks: list[ExtractedChunk] = []
+    embeddings: list[list[float] | None] = []
+    error: str | None = None
+    try:
+        chunks = extract_chunks(original, file_type)
+        embeddings = validate_embeddings(create_embeddings(chunks, config), len(chunks)) if config.kb_mode == "real_ai" else [None] * len(chunks)
+    except ValueError as exc:
+        error = str(exc)[:512]
+        logger.warning("Документ %s, поколение %s: %s", document_id, generation, error)
+    except Exception:
+        error = "Внутренняя ошибка обработки документа"
+        logger.exception("Ошибка обработки документа %s", document_id)
+
+    with factory() as db:
+        document = db.scalar(select(Document).where(Document.id == document_id).with_for_update())
+        if document is None or document.generation != generation or document.lease_token != token:
+            return True
+        db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document_id))
+        if error is None:
+            db.add_all(
+                DocumentChunk(
+                    document_id=document_id,
+                    generation=generation,
+                    chunk_index=index,
+                    text=chunk.text,
+                    page_number=chunk.page_number,
+                    line_start=chunk.line_start,
+                    line_end=chunk.line_end,
+                    embedding=embeddings[index],
+                )
+                for index, chunk in enumerate(chunks)
+            )
+            document.status = "ready"
+            document.config_signature = config_signature(config)
+        else:
+            document.status = "failed"
+            document.config_signature = None
+        document.error = error
+        document.lease_token = None
+        document.lease_deadline = None
+        db.commit()
+    return True
+
+
+def main() -> None:
+    logging.basicConfig(level=settings.log_level.upper(), format="%(asctime)s %(levelname)s %(message)s")
+    while True:
+        try:
+            if not process_one():
+                time.sleep(2)
+        except Exception:
+            logger.exception("Ошибка worker; повторная попытка через 2 секунды")
+            time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()

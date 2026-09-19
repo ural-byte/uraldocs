@@ -118,6 +118,6 @@ def test_auth_and_admin_body_limit(client, users):
     assert client.post("/admin/users", headers=ORIGIN, json={"username": "new", "password": "long-password-123"}).status_code == 201
 
 
-def test_other_admin_paths_have_no_auth_body_limit(client):
+def test_unknown_admin_paths_have_no_auth_body_limit(client):
     oversized = b"x" * (16 * 1024 + 1)
-    assert client.post("/admin/documents", content=oversized, headers=ORIGIN).status_code == 404
+    assert client.post("/admin/unknown", content=oversized, headers=ORIGIN).status_code == 404

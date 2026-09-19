@@ -37,6 +37,15 @@ services:
       timeout: 3s
       retries: 5
 
+  worker:
+    build: ./api
+    env_file: .env
+    command: ["python", "-m", "app.worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
   web:
     build: ./web
     environment:

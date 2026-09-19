@@ -1,18 +1,21 @@
 import logging
 import re
 import time
+from datetime import datetime
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import Session as DatabaseSession
+from sqlalchemy.orm import Session as DatabaseSession, defer
+from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.config import settings
 from app.db import get_db
-from app.models import User
+from app.kb import config_signature
+from app.models import Document, DocumentChunk, User
 from app.security import (
     SESSION_COOKIE,
     create_session,
@@ -33,23 +36,33 @@ AUTH_BODY_LIMIT_PATHS = frozenset({"/auth/login", "/auth/logout", "/admin/users"
 AUTH_BODY_LIMIT_USER_ACTION = re.compile(r"^/admin/users/[^/]+/(?:disable|reset-password)$")
 
 
-class AuthBodyLimitMiddleware:
+class RequestBodyLimitMiddleware:
     def __init__(self, app: ASGIApp):
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         path = scope.get("path", "")
+        upload = path == "/admin/documents" and scope.get("method") == "POST"
         if (
             scope["type"] != "http"
             or scope["method"] != "POST"
-            or (path not in AUTH_BODY_LIMIT_PATHS and AUTH_BODY_LIMIT_USER_ACTION.fullmatch(path) is None)
+            or (path not in AUTH_BODY_LIMIT_PATHS and AUTH_BODY_LIMIT_USER_ACTION.fullmatch(path) is None and not upload)
         ):
             await self.app(scope, receive, send)
             return
 
+        if upload and not any(
+            name == b"content-type" and value.lower().startswith(b"multipart/form-data;")
+            for name, value in scope.get("headers", [])
+        ):
+            await JSONResponse({"detail": "Требуется multipart/form-data"}, status_code=415)(scope, receive, send)
+            return
+
+        limit = settings.max_upload_bytes + 1024 * 1024 if upload else AUTH_BODY_LIMIT
+
         for name, value in scope.get("headers", []):
-            if name == b"content-length" and value.isdigit() and int(value) > AUTH_BODY_LIMIT:
-                await Response(status_code=413)(scope, receive, send)
+            if name == b"content-length" and value.isdigit() and int(value) > limit:
+                await JSONResponse({"detail": "Превышен размер загрузки"}, status_code=413)(scope, receive, send)
                 return
 
         body = bytearray()
@@ -58,8 +71,8 @@ class AuthBodyLimitMiddleware:
             if message["type"] == "http.disconnect":
                 return
             chunk = message.get("body", b"")
-            if len(body) + len(chunk) > AUTH_BODY_LIMIT:
-                await Response(status_code=413)(scope, receive, send)
+            if len(body) + len(chunk) > limit:
+                await JSONResponse({"detail": "Превышен размер загрузки"}, status_code=413)(scope, receive, send)
                 return
             body.extend(chunk)
             if not message.get("more_body", False):
@@ -77,7 +90,7 @@ class AuthBodyLimitMiddleware:
         await self.app(scope, replay_receive, send)
 
 
-app.add_middleware(AuthBodyLimitMiddleware)
+app.add_middleware(RequestBodyLimitMiddleware)
 
 
 class LoginRequest(BaseModel):
@@ -100,6 +113,34 @@ class UserResponse(BaseModel):
     username: str
     role: str
     is_active: bool
+
+
+class DocumentResponse(BaseModel):
+    id: int
+    filename: str
+    file_type: str
+    status: str
+    error: str | None
+    generation: int
+    config_signature: str | None
+    index_current: bool
+    created_at: datetime
+    updated_at: datetime
+
+
+def as_document_response(document: Document) -> DocumentResponse:
+    return DocumentResponse(
+        id=document.id,
+        filename=document.filename,
+        file_type=document.file_type,
+        status=document.status,
+        error=document.error,
+        generation=document.generation,
+        config_signature=document.config_signature,
+        index_current=document.status == "ready" and document.config_signature == config_signature(settings),
+        created_at=document.created_at,
+        updated_at=document.updated_at,
+    )
 
 
 def as_user_response(user: User) -> UserResponse:
@@ -237,3 +278,83 @@ def reset_password(user_id: int, payload: PasswordReset, _actor: AdminUser, db: 
     revoke_sessions(db, user.id)
     db.commit()
     return as_user_response(user)
+
+
+@app.post("/admin/documents", response_model=DocumentResponse, status_code=201)
+async def upload_document(_actor: AdminUser, db: Db, file: UploadFile = File()):
+    filename = (file.filename or "").replace("\\", "/").split("/")[-1].strip()
+    if not filename or len(filename) > 255 or "\x00" in filename:
+        raise HTTPException(status_code=422, detail="Некорректное имя файла")
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    file_type = {"pdf": "pdf", "txt": "txt", "md": "md", "markdown": "md"}.get(extension)
+    if file_type is None:
+        raise HTTPException(status_code=415, detail="Поддерживаются только PDF, TXT и Markdown")
+    original = await file.read(settings.max_upload_bytes + 1)
+    if len(original) > settings.max_upload_bytes:
+        raise HTTPException(status_code=413, detail="Превышен размер файла")
+    if not original:
+        raise HTTPException(status_code=422, detail="Файл пуст")
+    if file_type == "pdf" and not original.startswith(b"%PDF-"):
+        raise HTTPException(status_code=415, detail="Файл не является PDF")
+    if file_type != "pdf" and (b"\x00" in original or original.startswith(b"%PDF-")):
+        raise HTTPException(status_code=415, detail="Файл не является текстовым документом")
+    document = Document(filename=filename, file_type=file_type, original=original, status="pending", generation=1)
+    db.add(document)
+    db.commit()
+    db.refresh(document)
+    return as_document_response(document)
+
+
+@app.get("/admin/documents", response_model=list[DocumentResponse])
+def list_documents(_actor: AdminUser, db: Db):
+    return [as_document_response(doc) for doc in db.scalars(select(Document).options(defer(Document.original)).order_by(Document.id.desc()))]
+
+
+@app.get("/admin/documents/{document_id}", response_model=DocumentResponse)
+def document_status(document_id: int, _actor: AdminUser, db: Db):
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail="Документ не найден")
+    return as_document_response(document)
+
+
+@app.delete("/admin/documents/{document_id}", status_code=204)
+def delete_document(document_id: int, _actor: AdminUser, db: Db):
+    document = db.scalar(select(Document).where(Document.id == document_id).with_for_update())
+    if document is None:
+        raise HTTPException(status_code=404, detail="Документ не найден")
+    db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document_id))
+    db.delete(document)
+    db.commit()
+
+
+def queue_reindex(document: Document, db: DatabaseSession) -> None:
+    document.generation += 1
+    document.status = "pending"
+    document.error = None
+    document.config_signature = None
+    document.lease_token = None
+    document.lease_deadline = None
+    db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document.id))
+
+
+@app.post("/admin/documents/{document_id}/reindex", response_model=DocumentResponse)
+def reindex_document(document_id: int, _actor: AdminUser, db: Db):
+    document = db.scalar(select(Document).where(Document.id == document_id).with_for_update())
+    if document is None:
+        raise HTTPException(status_code=404, detail="Документ не найден")
+    if document.status == "pending":
+        raise HTTPException(status_code=409, detail="Документ уже ожидает обработки")
+    queue_reindex(document, db)
+    db.commit()
+    db.refresh(document)
+    return as_document_response(document)
+
+
+@app.post("/admin/documents/reindex", response_model=dict[str, int])
+def reindex_all_documents(_actor: AdminUser, db: Db):
+    documents = db.scalars(select(Document).order_by(Document.id).with_for_update()).all()
+    for document in documents:
+        queue_reindex(document, db)
+    db.commit()
+    return {"queued": len(documents)}
