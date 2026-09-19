@@ -72,6 +72,59 @@ class DocumentChunk(Base):
     document: Mapped[Document] = relationship(back_populates="chunks")
 
 
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(120), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    messages: Mapped[list["Message"]] = relationship(back_populates="conversation", cascade="all, delete-orphan")
+
+
+class Message(Base):
+    __tablename__ = "messages"
+    __table_args__ = (
+        CheckConstraint("role IN ('user', 'assistant')", name="ck_messages_role"),
+        CheckConstraint("kind IN ('question', 'answer', 'demo', 'insufficient', 'index_unavailable')", name="ck_messages_kind"),
+        CheckConstraint(
+            "(role = 'user' AND kind = 'question' AND reply_to_id IS NULL) OR "
+            "(role = 'assistant' AND kind != 'question' AND reply_to_id IS NOT NULL)",
+            name="ck_messages_pair",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    reply_to_id: Mapped[int | None] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), index=True, unique=True)
+    role: Mapped[str] = mapped_column(String(10), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    conversation: Mapped[Conversation] = relationship(back_populates="messages")
+    reply_to: Mapped["Message | None"] = relationship(remote_side="Message.id")
+    sources: Mapped[list["MessageSource"]] = relationship(back_populates="message", cascade="all, delete-orphan")
+
+
+class MessageSource(Base):
+    __tablename__ = "message_sources"
+    __table_args__ = (CheckConstraint("(page_number IS NOT NULL AND line_start IS NULL AND line_end IS NULL) OR (page_number IS NULL AND line_start IS NOT NULL AND line_end IS NOT NULL)", name="ck_message_sources_location"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), nullable=False, index=True)
+    document_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id", ondelete="SET NULL"), index=True)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    page_number: Mapped[int | None] = mapped_column(Integer)
+    line_start: Mapped[int | None] = mapped_column(Integer)
+    line_end: Mapped[int | None] = mapped_column(Integer)
+    citation_id: Mapped[str | None] = mapped_column(String(10))
+    excerpt: Mapped[str | None] = mapped_column(Text)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    message: Mapped[Message] = relationship(back_populates="sources")
+
+
 DocumentChunk.__table__.append_constraint(
     Index(
         "ix_document_chunks_text_search",
@@ -79,3 +132,12 @@ DocumentChunk.__table__.append_constraint(
         postgresql_using="gin",
     ).ddl_if(dialect="postgresql")
 )
+
+for language, suffix in (("russian", "ru"), ("english", "en")):
+    DocumentChunk.__table__.append_constraint(
+        Index(
+            f"ix_document_chunks_text_search_{suffix}",
+            func.to_tsvector(literal_column(f"'{language}'"), DocumentChunk.text),
+            postgresql_using="gin",
+        ).ddl_if(dialect="postgresql")
+    )

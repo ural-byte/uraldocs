@@ -8,14 +8,15 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, Up
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy.orm import Session as DatabaseSession, defer
+from sqlalchemy.orm import Session as DatabaseSession, defer, selectinload, sessionmaker
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.config import settings
+from app.chat import ChatError, answer_question
 from app.db import get_db
 from app.kb import config_signature
-from app.models import Document, DocumentChunk, User
+from app.models import Conversation, Document, DocumentChunk, Message, MessageSource, User
 from app.security import (
     SESSION_COOKIE,
     create_session,
@@ -33,8 +34,9 @@ app = FastAPI(title="UralDocs API")
 Db = Annotated[DatabaseSession, Depends(get_db)]
 AUTH_BODY_LIMIT = 16 * 1024
 REINDEX_BATCH_SIZE = 100
-AUTH_BODY_LIMIT_PATHS = frozenset({"/auth/login", "/auth/logout", "/admin/users"})
+AUTH_BODY_LIMIT_PATHS = frozenset({"/auth/login", "/auth/logout", "/admin/users", "/conversations"})
 AUTH_BODY_LIMIT_USER_ACTION = re.compile(r"^/admin/users/[^/]+/(?:disable|reset-password)$")
+CHAT_BODY_LIMIT_ACTION = re.compile(r"^/conversations/[^/]+/messages$")
 
 
 class RequestBodyLimitMiddleware:
@@ -47,7 +49,8 @@ class RequestBodyLimitMiddleware:
         if (
             scope["type"] != "http"
             or scope["method"] != "POST"
-            or (path not in AUTH_BODY_LIMIT_PATHS and AUTH_BODY_LIMIT_USER_ACTION.fullmatch(path) is None and not upload)
+            or (path not in AUTH_BODY_LIMIT_PATHS and AUTH_BODY_LIMIT_USER_ACTION.fullmatch(path) is None
+                and CHAT_BODY_LIMIT_ACTION.fullmatch(path) is None and not upload)
         ):
             await self.app(scope, receive, send)
             return
@@ -59,7 +62,12 @@ class RequestBodyLimitMiddleware:
             await JSONResponse({"detail": "Требуется multipart/form-data"}, status_code=415)(scope, receive, send)
             return
 
-        limit = settings.max_upload_bytes + 1024 * 1024 if upload else AUTH_BODY_LIMIT
+        if upload:
+            limit = settings.max_upload_bytes + 1024 * 1024
+        elif CHAT_BODY_LIMIT_ACTION.fullmatch(path):
+            limit = 12 * settings.chat_max_question_chars + 1024
+        else:
+            limit = AUTH_BODY_LIMIT
 
         for name, value in scope.get("headers", []):
             if name == b"content-length" and value.isdigit() and int(value) > limit:
@@ -127,6 +135,86 @@ class DocumentResponse(BaseModel):
     index_current: bool
     created_at: datetime
     updated_at: datetime
+
+
+class ConversationCreate(BaseModel):
+    title: str = Field(default="Новая беседа", min_length=1, max_length=120)
+
+
+class ConversationResponse(BaseModel):
+    id: int
+    title: str
+    created_at: datetime
+    updated_at: datetime
+
+
+class SourceResponse(BaseModel):
+    id: int
+    citation_id: str | None
+    filename: str
+    page_number: int | None
+    line_start: int | None
+    line_end: int | None
+    excerpt: str | None
+    deleted: bool
+    anchor: str
+
+
+class MessageResponse(BaseModel):
+    id: int
+    role: str
+    kind: str
+    text: str
+    reply_to_id: int | None
+    created_at: datetime
+    sources: list[SourceResponse]
+
+
+class ConversationDetailResponse(ConversationResponse):
+    messages: list[MessageResponse]
+
+
+class QuestionRequest(BaseModel):
+    question: str = Field(min_length=1, max_length=10000)
+
+
+class QuestionPairResponse(BaseModel):
+    user: MessageResponse
+    assistant: MessageResponse
+
+
+def as_conversation_response(conversation: Conversation) -> ConversationResponse:
+    return ConversationResponse(
+        id=conversation.id,
+        title=conversation.title,
+        created_at=conversation.created_at,
+        updated_at=conversation.updated_at,
+    )
+
+
+def as_message_response(message: Message) -> MessageResponse:
+    return MessageResponse(
+        id=message.id,
+        role=message.role,
+        kind=message.kind,
+        text=message.text,
+        reply_to_id=message.reply_to_id,
+        created_at=message.created_at,
+        sources=[
+            SourceResponse(
+                id=source.id,
+                citation_id=source.citation_id,
+                filename=source.filename,
+                page_number=source.page_number,
+                line_start=source.line_start,
+                line_end=source.line_end,
+                excerpt=source.excerpt,
+                deleted=source.deleted_at is not None or source.document_id is None,
+                anchor=f"source-{source.id}",
+            )
+            for source in sorted(message.sources, key=lambda item: item.ordinal)
+        ],
+    )
 
 
 def as_document_response(document: Document) -> DocumentResponse:
@@ -239,6 +327,66 @@ def me(user: CurrentUser):
     return as_user_response(user)
 
 
+@app.post("/conversations", response_model=ConversationResponse, status_code=201)
+def create_conversation(payload: ConversationCreate, actor: CurrentUser, db: Db):
+    title = payload.title.strip()
+    if not title:
+        raise HTTPException(status_code=422, detail="Название беседы пусто")
+    conversation = Conversation(owner_id=actor.id, title=title)
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+    return as_conversation_response(conversation)
+
+
+@app.get("/conversations", response_model=list[ConversationResponse])
+def list_conversations(actor: CurrentUser, db: Db):
+    return [
+        as_conversation_response(conversation)
+        for conversation in db.scalars(
+            select(Conversation).where(Conversation.owner_id == actor.id)
+            .order_by(Conversation.updated_at.desc(), Conversation.id.desc())
+        )
+    ]
+
+
+@app.get("/conversations/{conversation_id}", response_model=ConversationDetailResponse)
+def get_conversation(conversation_id: int, actor: CurrentUser, db: Db):
+    conversation = db.scalar(select(Conversation).where(Conversation.id == conversation_id, Conversation.owner_id == actor.id))
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Беседа не найдена")
+    messages = db.scalars(
+        select(Message).options(selectinload(Message.sources))
+        .where(Message.conversation_id == conversation_id).order_by(Message.id)
+    ).all()
+    return ConversationDetailResponse(**as_conversation_response(conversation).model_dump(), messages=[as_message_response(item) for item in messages])
+
+
+@app.delete("/conversations/{conversation_id}", status_code=204)
+def delete_conversation(conversation_id: int, actor: CurrentUser, db: Db):
+    conversation = db.scalar(
+        select(Conversation).where(Conversation.id == conversation_id, Conversation.owner_id == actor.id).with_for_update()
+    )
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Беседа не найдена")
+    db.delete(conversation)
+    db.commit()
+
+
+@app.post("/conversations/{conversation_id}/messages", response_model=QuestionPairResponse, status_code=201)
+def ask_conversation(conversation_id: int, payload: QuestionRequest, actor: CurrentUser, db: Db):
+    owner_id = actor.id
+    factory = sessionmaker(bind=db.get_bind(), expire_on_commit=False)
+    db.rollback()
+    try:
+        user_id, assistant_id = answer_question(factory, owner_id, conversation_id, payload.question, settings)
+    except ChatError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail) from None
+    user_message = db.get(Message, user_id, options=[selectinload(Message.sources)])
+    assistant_message = db.get(Message, assistant_id, options=[selectinload(Message.sources)])
+    return QuestionPairResponse(user=as_message_response(user_message), assistant=as_message_response(assistant_message))
+
+
 @app.get("/admin/users", response_model=list[UserResponse])
 def list_users(_actor: AdminUser, db: Db):
     return [as_user_response(user) for user in db.scalars(select(User).where(User.role == "user").order_by(User.id))]
@@ -324,6 +472,10 @@ def delete_document(document_id: int, _actor: AdminUser, db: Db):
     document = db.scalar(select(Document).options(defer(Document.original)).where(Document.id == document_id).with_for_update())
     if document is None:
         raise HTTPException(status_code=404, detail="Документ не найден")
+    db.execute(
+        update(MessageSource).where(MessageSource.document_id == document_id)
+        .values(document_id=None, excerpt=None, deleted_at=func.now())
+    )
     db.execute(delete(DocumentChunk).where(DocumentChunk.document_id == document_id))
     db.delete(document)
     db.commit()
