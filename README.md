@@ -1,93 +1,170 @@
-# Uraldocs
+# UralDocs
 
+Внутренняя база знаний на Next.js, FastAPI и PostgreSQL с расширением pgvector. Веб-интерфейс и API поддерживают вход, управление учётными записями и документами, поиск и беседы. Отдельный worker индексирует PDF с текстовым слоем, TXT и Markdown. Telegram-бот использует тот же сервис поиска и ответов для разрешённых ID.
 
+## Локальный запуск
 
-## Getting started
+Нужны Docker Engine и Docker Compose. Из корня репозитория:
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
-
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
-
-```
-cd existing_repo
-git remote add origin https://gitlab.com/uralbyte-group/uraldocs.git
-git branch -M main
-git push -uf origin main
+```sh
+cp .env.example .env
 ```
 
-## Integrate with your tools
+Задайте в `.env` собственный `POSTGRES_PASSWORD` (без пустого значения). Для `KB_MODE=demo` оставьте `AI_*` пустыми: ключ и внешняя модель не нужны. URL подключения к БД формируется из переменных `POSTGRES_*`; при внешней БД можно задать `DATABASE_URL` напрямую. Если меняете адрес веб-приложения, обновите `APP_ORIGIN`. Для локального HTTP оставьте `COOKIE_SECURE=false`; при HTTPS задайте `true`.
 
-* [Set up project integrations](https://gitlab.com/uralbyte-group/uraldocs/-/settings/integrations)
+```sh
+docker compose up --build -d
+docker compose ps
+curl http://localhost:8000/health/live
+curl http://localhost:8000/health/ready
+```
 
-## Collaborate with your team
+Сервис `migrate` применяет Alembic-миграции после готовности PostgreSQL. API и worker запускаются после успешной миграции, веб-приложение — после готовности API. `live` проверяет процесс API, `ready` выполняет запрос к БД. Веб-страницы: <http://localhost:3000/ru> и <http://localhost:3000/en>.
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+Создайте первого администратора и демонстрационного пользователя. Команда дважды запросит каждый пароль без вывода на экран; пароли длиной от 12 до 1024 символов. Если admin уже существует или логин занят, команда завершается ошибкой и ничего не перезаписывает.
 
-## Test and Deploy
+```sh
+docker compose run --rm -it api python -m app.cli bootstrap
+```
 
-Use the built-in continuous integration in GitLab.
+Логины по умолчанию — `admin` и `demo`. Их можно изменить: `bootstrap --admin <логин> --demo-user <логин>`. Фиксированных паролей нет. Пароли хранятся только как хеши Argon2id.
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+### Проверка demo на примерах
 
-***
+Войдите на <http://localhost:3000/ru> как `admin` с заданным при bootstrap паролем. На странице «Документы» загрузите [вымышленный TXT-образец](examples/lazur.txt) и, по желанию, [английский Markdown-образец](examples/atlas.md). Дождитесь статуса `ready` и признака актуального индекса; `pending` означает, что worker ещё обрабатывает файл, а `failed` показывает причину отказа. В новой беседе задайте:
 
-# Editing this README
+- «Какой срок подачи заявки проекта Лазурь?» — ожидается выдержка с датой **12 мая 2027 года**, названием `lazur.txt` и строками источника. В `demo` это результат поиска, а не сгенерированный ответ.
+- «Каков бюджет проекта Лазурь?» — ожидается сообщение о нехватке сведений, без выдуманной суммы.
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+Для английского образца вопрос «What is the opening day of the Project Atlas help desk?» на странице `/en` должен показать выдержку о Tuesdays. Текст образцов вымышленный и не содержит реальных учётных данных.
 
-## Suggestions for a good README
+### Проверка real AI
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+Для настоящего OpenAI-совместимого провайдера укажите в `.env` `KB_MODE=real_ai`, `AI_BASE_URL` с путём `/v1`, `AI_API_KEY`, `AI_EMBEDDING_MODEL` и `AI_CHAT_MODEL`. Провайдер должен поддерживать `/embeddings` и `/chat/completions` в формате, описанном ниже. Содержимое фрагментов и текущий вопрос передаются по заданному адресу; в запросе генерации также передаются найденные выдержки и до трёх последних пар текущей беседы. После смены режима или модели выполните:
 
-## Name
-Choose a self-explaining name for your project.
+```sh
+docker compose up -d --force-recreate api worker
+```
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+На странице документов нажмите «Переиндексировать все», дождитесь `ready` и актуального индекса, затем повторите оба вопроса. Подтверждённый ответ должен содержать текст и источник; неподтверждённый — сообщение о нехватке сведений. Если провайдер недоступен, проверьте статус документа и ошибку чата; автоматического перехода в `demo` нет. Ключи храните только в локальном `.env`.
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+Для проверки сетевого контракта без внешнего провайдера доступен **локальный тестовый сервер**. Он выдаёт одинаковые векторы и заранее заданные ответы только для двух вопросов по образцам; качество семантического поиска и генерацию реальной модели он не проверяет. Запустите его в сети Compose:
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+```sh
+docker compose --profile mock-ai up -d mock-ai
+```
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+В `.env` задайте `KB_MODE=real_ai`, `AI_BASE_URL=http://mock-ai:8080/v1`, `AI_API_KEY=local-test-only`, `AI_EMBEDDING_MODEL=mock-embedding` и `AI_CHAT_MODEL=mock-chat`. Значение `local-test-only` — фиктивное локальное значение, не секрет. Затем пересоздайте `api` и `worker` указанной выше командой, переиндексируйте образцы и повторите вопросы. Для неподтверждённого вопроса сервер возвращает `insufficient`; для подтверждённого — цитату на найденный фрагмент. Чтобы вернуться в `demo`, поставьте `KB_MODE=demo`, пересоздайте сервисы и переиндексируйте документы.
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+### Операторские команды
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+```sh
+docker compose run --rm -it api python -m app.cli create-admin <логин>
+docker compose run --rm -it api python -m app.cli reset-admin <логин>
+docker compose run --rm -it api python -m app.cli disable-admin <логин>
+```
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+Пароли не передаются через аргументы командной строки или переменные окружения. `reset-admin` отзывает все сеансы администратора. Последнего активного администратора отключить нельзя. Сброс пароля не включает отключённую учётную запись.
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+## Веб-интерфейс
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+Откройте `/ru` или `/en` на адресе веб-приложения. Переключатель языка сохраняет текущую страницу и беседу. Обе роли могут создавать беседы, задавать вопросы, просматривать историю и переходить к источникам внутри ответа. В режиме `demo` интерфейс явно показывает результат поиска без ИИ-ответа. Отсутствие подтверждённого ответа, недоступный индекс и ошибка провайдера отображаются отдельно.
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+Администратору доступны страницы документов и пользователей. На странице документов можно загрузить PDF, TXT или Markdown, просмотреть статус и ошибку обработки, повторить индексацию или удалить документ. Список обновляется автоматически, пока есть ожидающие документы; доступно и ручное обновление. На странице пользователей можно создать, отключить пользователя роли `user` и установить ему новый постоянный пароль. Администраторы обслуживаются через CLI.
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+Ответы и выдержки отображаются как обычный текст. Карточка источника содержит название, страницу или строки, выдержку и внутренний якорь; оригинал документа через беседу не выдаётся.
 
-## License
-For open source projects, say how it is licensed.
+## API и доступ
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+Веб-приложение проксирует запросы `/api/*` к FastAPI через сервер Next.js. Браузер обращается к тому же origin, на котором открыта страница. Для изменения данных API требует заголовок `Origin`, точно совпадающий с `APP_ORIGIN`. Прямые вызовы API должны передавать его явно.
+
+| Метод и путь | Назначение |
+| --- | --- |
+| `GET /health/live` | Процесс API работает |
+| `GET /health/ready` | БД доступна |
+| `POST /auth/login` | Вход, тело `{"username":"...","password":"..."}` |
+| `POST /auth/logout` | Выход и отзыв текущего сеанса |
+| `GET /auth/me` | Текущий пользователь |
+| `GET /ui/config` | Режим базы знаний, предел загрузки и длина вопроса для интерфейса |
+| `GET /admin/users` | Список пользователей роли `user` |
+| `POST /admin/users` | Создание пользователя `user` |
+| `POST /admin/users/{id}/disable` | Отключение пользователя |
+| `POST /admin/users/{id}/reset-password` | Установка нового постоянного пароля |
+| `POST /admin/documents` | Загрузка файла, поле multipart `file` |
+| `GET /admin/documents` | Список документов и статусы |
+| `GET /admin/documents/{id}` | Статус одного документа |
+| `DELETE /admin/documents/{id}` | Удаление оригинала и индекса |
+| `POST /admin/documents/{id}/reindex` | Повторная обработка документа |
+| `POST /admin/documents/reindex` | Повторная обработка всех документов |
+| `POST /conversations` | Создание беседы, тело `{"title":"..."}`; название можно опустить |
+| `GET /conversations` | Список собственных бесед |
+| `GET /conversations/{id}` | Собственная беседа с сообщениями и источниками |
+| `DELETE /conversations/{id}` | Удаление собственной беседы и её истории |
+| `POST /conversations/{id}/messages` | Вопрос, тело `{"question":"..."}`; возвращает пару сообщений |
+
+Административные методы доступны только роли `admin`. API управляет только учётными записями роли `user`: создание и изменение другого `admin`, отключение себя и сброс собственного пароля через API запрещены. Администраторов обслуживает оператор через CLI. При сбросе пароля администратор задаёт новый постоянный пароль в теле `{"password":"..."}` и передаёт его пользователю вне приложения. Обязательной смены при следующем входе нет.
+
+Загрузка принимает только PDF, TXT, `.md` и `.markdown`. Тип определяется по расширению и признакам содержимого, а не по заявленному MIME. Размер файла ограничен `MAX_UPLOAD_BYTES` (по умолчанию 10 МиБ); запрос ограничен до разбора multipart. Новая запись получает `pending`. Worker извлекает текст, сохраняет фрагменты с номером страницы PDF или диапазоном строк текстового файла и переводит запись в `ready`. Пустой PDF, скан без текстового слоя, повреждённый PDF и текст не в UTF-8 переходят в `failed` с причиной. После перезапуска worker снова берёт незавершённую работу по истечении `WORKER_LEASE_SECONDS`.
+
+В `demo` фрагменты доступны для текстового поиска без embeddings. Индекс текущей конфигурации определяется сочетанием `status=ready`, текущего `generation` и совпадения `config_signature` с режимом; в `real_ai` подпись также учитывает адрес и модель embeddings. API возвращает вычисленный признак `index_current`. При изменении режима или модели запустите переиндексацию. Ошибка обработки не оставляет готовых фрагментов. Удаление документа удаляет оригинал и фрагменты каскадно.
+
+### Контракт индекса для поиска
+
+Для поиска соединяйте `document_chunks.document_id = documents.id` и выбирайте только `documents.status = 'ready'`, `document_chunks.generation = documents.generation` и `documents.config_signature = config_signature(settings)` из `app.kb`. В `real_ai` дополнительно требуется `document_chunks.embedding IS NOT NULL`. Фрагменты хранятся в порядке `chunk_index`; `page_number` задан для PDF, `line_start` и `line_end` — для TXT/Markdown. В PostgreSQL доступны GIN-индексы `to_tsvector('simple', ...)`, `to_tsvector('russian', ...)` и `to_tsvector('english', ...)`; поиск в беседах использует языковой индекс вопроса. Оригинал находится только в `documents.original` и не должен возвращаться поисковым API.
+
+При `KB_MODE=real_ai` worker отправляет тексты фрагментов партиями до 64 штук в `POST {AI_BASE_URL}/embeddings` с `AI_EMBEDDING_MODEL` и ключом `AI_API_KEY` в заголовке Bearer. Сервис должен возвращать JSON в формате OpenAI: массив `data` с индексом `index` и числовым вектором `embedding` для каждого фрагмента. Время ожидания задаёт `AI_TIMEOUT_SECONDS`. Ошибка сети, тайм-аут или некорректный ответ переводят документ в `failed` без готовых фрагментов; текст ошибки сервиса и ключ не сохраняются. В режиме `demo` внешних запросов нет.
+
+### Беседы и ответы
+
+Администратор и обычный пользователь видят только собственные беседы; обращение к чужой беседе возвращает `404`. Сообщения сохраняются парами «вопрос–ответ». После повторного входа история доступна через `GET /conversations/{id}`. У каждого источника есть постоянный `id` и внутренний `anchor` вида `source-{id}`, имя файла, номер страницы PDF либо диапазон строк TXT/Markdown и выдержка. Для ссылок в ИИ-ответе поле `citation_id` связывает маркер вида `[c2]` с источником; у demo-источников оно равно `null`. API не выдаёт оригинал файла и внешнюю ссылку. При удалении документа старый ответ, ID, имя и расположение источника остаются в истории, а выдержка очищается и `deleted` становится `true`.
+
+Поиск использует только готовые фрагменты текущего поколения и текущей `config_signature`. В `demo` PostgreSQL ищет по текущему вопросу через полнотекстовые индексы русского и английского языка: служебные слова исключаются, формы слов приводятся к общей основе, значимые слова должны совпасть вместе. Найденные выдержки возвращаются с пометкой «ИИ-ответ не формируется»; исходящих AI-запросов нет. В `real_ai` текущий вопрос отправляется в `POST {AI_BASE_URL}/embeddings`, затем выполняется поиск pgvector по косинусной близости. При наличии релевантных фрагментов `POST {AI_BASE_URL}/chat/completions` получает текущий вопрос, непрозрачные ID с выдержками и до трёх последних пар из той же беседы. Имя файла и расположение источника остаются на сервере. История помогает понять контекст, но не является источником фактов. Ответ провайдера должен содержать JSON в `choices[0].message.content`: `{"insufficient":false,"answer":"...","citation_ids":["c1"]}` или `{"insufficient":true,"citation_ids":[]}`. Ссылки принимаются только на переданные фрагменты; пользовательские источники строятся сервером из БД. Ошибка провайдера или некорректный ответ возвращают `502`/`504` без сохранения неполной пары и без перехода в demo. При отсутствии основания сохраняется ответ `insufficient`, при недоступном индексе — `index_unavailable`.
+
+Для `real_ai` задайте `AI_CHAT_MODEL`; адрес, ключ и модель embeddings задаются переменными `AI_BASE_URL`, `AI_API_KEY` и `AI_EMBEDDING_MODEL`. `AI_TIMEOUT_SECONDS` ограничивает ожидание каждого AI-запроса. `CHAT_TOP_K` (1–20) ограничивает число фрагментов, `CHAT_MIN_SIMILARITY` (0–1) — минимальную косинусную близость, `CHAT_MAX_QUESTION_CHARS`, `CHAT_MAX_ANSWER_CHARS` и `CHAT_MAX_EXCERPT_CHARS` — длины вопроса, ответа и выдержки. При изменении режима или настроек embeddings переиндексируйте документы.
+
+Сервис `app.chat.generate_answer(factory, question, history, config)` учитывает до трёх последних пар `HistoryPair` из вызывающего канала и возвращает `AnswerResult(kind, text, sources)` без веб-пользователя, беседы и записи сообщений. Веб-API отдельно проверяет владельца и перед сохранением пары повторно проверяет актуальность источников. Другие каналы могут использовать тот же поиск и генерацию со своей историей и своим хранилищем.
+
+### Telegram-бот
+
+Бот запускается отдельным процессом через профиль Compose. Укажите `TELEGRAM_BOT_TOKEN` и `TELEGRAM_ALLOWED_IDS` (положительные числовые ID пользователей через запятую) в `.env`, затем выполните `docker compose --profile telegram up -d --build telegram`. `TELEGRAM_POLL_TIMEOUT_SECONDS` задаёт время ожидания обновлений (1–50 секунд, по умолчанию 25). Для бота должен быть отключён webhook: Telegram не позволяет одновременно использовать webhook и `getUpdates`. Не передавайте токен и `.env` в репозиторий.
+
+Бот принимает только текстовые сообщения от пользователей из списка разрешённых ID в личном чате, где ID чата совпадает с ID отправителя. Остальные обновления пропускаются без поиска и ответа. Поддерживаются русский и английский. Без ручного выбора язык вопроса определяется локальной моделью fastText без внешнего вызова: уверенно распознанное сообщение использует язык текста, короткое или неясное — язык профиля Telegram. Если язык профиля не поддерживается или неизвестен, бот показывает двуязычную подсказку; при уверенно распознанном ином языке сообщает о границе RU/EN. Определение языка работает по принципу best effort и может ошибаться на отдельных сообщениях.
+
+Команды `/ru` и `/en` сохраняют язык ответа для конкретного разрешённого Telegram ID до смены другой командой. Выбор имеет приоритет над автоопределением и сохраняется после перезапуска бота. Команды не попадают в историю вопросов. В `demo` язык поиска по документам определяется по тексту вопроса независимо от выбранного языка ответа. Модель, лицензия, атрибуция, проверка целостности и открытая калибровка описаны в [документации модели](api/app/data/README.md). История бота хранится в PostgreSQL отдельно от веб-бесед: последние три успешно доставленные пары на каждого отправителя.
+
+Ответ отправляется обычным текстом с названием и местом каждого источника. В `demo` добавляются релевантные выдержки и явная пометка об отсутствии ИИ-ответа. Оригиналы файлов не отправляются. В `real_ai` ошибка провайдера возвращает сообщение об ошибке без перехода в `demo` и без записи пары в историю. Длинный ответ делится на части; курсор обновлений и история сохраняются одной транзакцией только после доставки всех частей. При постоянном отказе Telegram `400` или `403` курсор продвигается без сохранения пары и языкового предпочтения, чтобы обслужить следующие ID. При сетевой ошибке, `429` или `5xx` обновление повторяется; уже доставленные части могут прийти повторно, поскольку Telegram Bot API не даёт атомарно связать отправку с транзакцией БД. Запускайте только один экземпляр бота с одним токеном и этой базой данных.
+
+Сеансы хранятся в БД по SHA-256 хешу случайного токена; браузер получает токен в cookie с `HttpOnly`, `SameSite=Lax` и настраиваемым `Secure`. На каждом запросе проверяются срок сеанса и состояние пользователя. Просроченный сеанс удаляется при обращении; при успешном входе удаляются все просроченные сеансы. Выход, отключение и сброс пароля отзывают сеансы. Настройка `SESSION_HOURS` задаёт срок сеанса.
+
+## Разработка и проверки
+
+Для backend нужен Python 3.12. Основные тесты используют временную SQLite-базу и не требуют запущенного Compose.
+
+```sh
+cd api
+python3.12 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements-dev.txt
+pytest -q
+```
+
+Тесты блокировок, документов, поиска и истории Telegram в PostgreSQL (`api/tests/test_auth_postgres.py`, `api/tests/test_documents_postgres.py`, `api/tests/test_chat_postgres.py`, `api/tests/test_telegram_postgres.py`) запускаются при заданном `TEST_POSTGRES_URL`; без него pytest пропускает эти тесты. Для проверки всего backend suite на PostgreSQL из корня репозитория после настройки `.env` выполните:
+
+```sh
+docker compose up -d --wait db
+docker compose run --rm --no-deps -v "$PWD/api:/app" api sh -c 'pip install -q -r requirements-dev.txt && TEST_POSTGRES_URL="$(python -c "from app.config import settings; print(settings.database_url)")" pytest -q'
+```
+
+Локальный тестовый AI-сервер проверяется отдельно: `python3 -m unittest discover -s tools -p "test_*.py"`. Бот без реального токена проверяется в backend suite тестами `test_telegram.py`, `test_telegram_postgres.py` и `test_language_id.py` с подменённым Telegram API. Для живой проверки добавьте собственный токен и свой Telegram ID в `.env`, выполните `docker compose --profile telegram up -d --build telegram`, отправьте `/ru`, `/en` и вопросы по образцам из разрешённого личного чата. `TELEGRAM_ALLOWED_IDS` принимает список числовых ID через запятую; посторонние ID не получают ответ. История трёх последних пар и выбор языка сохраняются в PostgreSQL.
+
+GitLab CI применяет миграции в PostgreSQL с pgvector, запускает полный backend suite и тест локального AI-сервера, затем выполняет проверки web. Для web нужен Node.js 22:
+
+```sh
+cd web
+npm ci
+npm run lint
+npm run typecheck
+npm run build
+```
+
+Для остановки сервисов: `docker compose down`. Данные PostgreSQL сохраняются в томе `postgres_data`; команда `docker compose down -v` удаляет этот том.
