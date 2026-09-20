@@ -24,9 +24,9 @@ def postgres_database():
     admin_engine = create_engine(url)
     with admin_engine.begin() as connection:
         connection.exec_driver_sql(f'CREATE SCHEMA "{schema}"')
-    engine = create_engine(url, connect_args={"options": f"-c search_path={schema}"})
+    engine = create_engine(url, connect_args={"options": f"-c search_path={schema},public"})
     try:
-        Base.metadata.create_all(engine)
+        Base.metadata.create_all(engine, checkfirst=False)
         yield engine, sessionmaker(bind=engine, expire_on_commit=False)
     finally:
         engine.dispose()

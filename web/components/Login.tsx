@@ -1,53 +1,51 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useState } from "react";
+import { useSession } from "@/components/AppShell";
+import { copy, type Language } from "@/lib/i18n";
 
-type User = { id: number; username: string; role: "admin" | "user" };
-const copy = {
-  ru: { title: "Вход в UralDocs", username: "Логин", password: "Пароль", login: "Войти", logout: "Выйти", welcome: "Вы вошли как", error: "Не удалось войти", role: "Роль" },
-  en: { title: "Sign in to UralDocs", username: "Username", password: "Password", login: "Sign in", logout: "Sign out", welcome: "Signed in as", error: "Sign in failed", role: "Role" },
-};
-
-export default function Login({ language }: { language: "ru" | "en" }) {
-  const t = copy[language];
-  const [user, setUser] = useState<User | null>(null);
+export default function Login({ lang }: { lang: Language }) {
+  const t = copy[lang];
+  const { signIn } = useSession();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  useEffect(() => {
-    fetch("/api/auth/me", { cache: "no-store" }).then((response) => response.ok ? response.json() : null).then(setUser).catch(() => setUser(null));
-  }, []);
-
-  async function signIn(event: FormEvent<HTMLFormElement>) {
+  async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
+    setBusy(true);
     try {
-      const response = await fetch("/api/auth/login", {
-        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ username, password }),
-      });
-      if (!response.ok) throw new Error();
-      setUser(await response.json());
+      await signIn(username.trim(), password);
       setPassword("");
-    } catch { setError(t.error); }
+    } catch {
+      setError(t.loginError);
+      setPassword("");
+    } finally {
+      setBusy(false);
+    }
   }
 
-  async function signOut() {
-    const response = await fetch("/api/auth/logout", { method: "POST" });
-    if (response.ok) setUser(null);
-  }
-
-  return <main className="shell">
-    <nav><strong>UralDocs</strong><span><a href="/ru" lang="ru">RU</a> / <a href="/en" lang="en">EN</a></span></nav>
-    <section className="card">
-      <h1>{t.title}</h1>
-      {user ? <><p>{t.welcome} <strong>{user.username}</strong></p><p>{t.role}: {user.role}</p><button onClick={signOut}>{t.logout}</button></> :
-        <form onSubmit={signIn}>
-          <label>{t.username}<input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required /></label>
-          <label>{t.password}<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
-          {error && <p role="alert" className="error">{error}</p>}
-          <button type="submit">{t.login}</button>
-        </form>}
+  return <main className="login-main">
+    <section className="login-story" aria-labelledby="login-title">
+      <span className="eyebrow light">{t.loginEyebrow}</span>
+      <h1 id="login-title">{t.loginTitle}</h1>
+      <p>{t.loginIntro}</p>
+      <div className="story-decoration" aria-hidden="true"><span>01</span><span>02</span><span>03</span></div>
+    </section>
+    <section className="login-card" aria-labelledby="login-form-title">
+      <span className="eyebrow">UralDocs</span>
+      <h2 id="login-form-title">{t.loginPanelTitle}</h2>
+      <p className="muted">{t.loginPanelText}</p>
+      <form onSubmit={submit} className="form-stack">
+        <label htmlFor="login-username">{t.username}</label>
+        <input id="login-username" autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required autoFocus />
+        <label htmlFor="login-password">{t.password}</label>
+        <input id="login-password" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required />
+        {error && <p role="alert" className="notice error">{error}</p>}
+        <button type="submit" className="button-primary button-wide" disabled={busy}>{busy ? t.signingIn : t.signIn}<span aria-hidden="true">→</span></button>
+      </form>
     </section>
   </main>;
 }

@@ -1,7 +1,13 @@
 alembic==1.16.5
 argon2-cffi==25.1.0
 fastapi==0.116.2
+fasttext-wheel==0.9.2
+httpx==0.28.1
+numpy==1.26.4
+pgvector==0.4.1
 psycopg[binary]==3.2.10
 pydantic-settings==2.10.1
+pypdf==6.1.1
+python-multipart==0.0.20
 SQLAlchemy==2.0.43
 uvicorn==0.35.0
