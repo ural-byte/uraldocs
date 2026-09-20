@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from app.chat import answer_question
+from app.chat import answer_question, generate_answer
 from app.config import Settings
 from app.kb import config_signature
 from app.models import Base, Conversation, Document, DocumentChunk, Message, MessageSource, User
@@ -102,6 +102,24 @@ def test_postgres_demo_natural_questions_require_all_meaningful_terms(postgres_c
         ]
         assert sources == [["ru.txt"], [], ["en.txt"], [], []]
     assert embeddings_server.requests == []
+
+
+def test_postgres_demo_search_uses_question_language_with_manual_answer_language(postgres_chat_database):
+    config = Settings(database_url="sqlite+pysqlite://", kb_mode="demo")
+    with postgres_chat_database.begin() as db:
+        add_document(db, config, "ru.txt", "Уралдокс поддерживает импорт PDF")
+        add_document(db, config, "en.txt", "UralDocs supports PDF import")
+
+    english_question = generate_answer(
+        postgres_chat_database, "Does UralDocs support PDF import?", [], config, language="ru",
+    )
+    russian_question = generate_answer(
+        postgres_chat_database, "Поддерживает ли Уралдокс импорт PDF?", [], config, language="en",
+    )
+    assert english_question.kind == "demo" and english_question.text.startswith("Демо-режим")
+    assert [source.filename for source in english_question.sources] == ["en.txt"]
+    assert russian_question.kind == "demo" and russian_question.text.startswith("Demo mode")
+    assert [source.filename for source in russian_question.sources] == ["ru.txt"]
 
 
 def test_postgres_pgvector_filters_dimension_and_similarity(postgres_chat_database, embeddings_server):
