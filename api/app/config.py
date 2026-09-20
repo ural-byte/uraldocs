@@ -23,9 +23,18 @@ class Settings(BaseSettings):
     ai_base_url: str = ""
     ai_api_key: str = ""
     ai_embedding_model: str = ""
+    ai_chat_model: str = ""
     ai_timeout_seconds: float = Field(default=30, gt=0)
+    chat_top_k: int = Field(default=5, ge=1, le=20)
+    chat_min_similarity: float = Field(default=0.7, ge=0, le=1)
+    chat_max_question_chars: int = Field(default=2000, ge=1, le=10000)
+    chat_max_answer_chars: int = Field(default=4000, ge=1, le=20000)
+    chat_max_excerpt_chars: int = Field(default=500, ge=1, le=1200)
     worker_lease_seconds: int = Field(default=300, gt=0)
     max_upload_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    telegram_bot_token: str = ""
+    telegram_allowed_ids: str = ""
+    telegram_poll_timeout_seconds: int = Field(default=25, ge=1, le=50)
 
     @model_validator(mode="after")
     def validate_ai(self) -> Self:
