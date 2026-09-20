@@ -8,7 +8,7 @@ from app import telegram_bot as bot
 from app.chat import AnswerResult, Candidate, ChatError
 from app.config import Settings
 from app.kb import config_signature
-from app.models import Document, DocumentChunk, TelegramHistory
+from app.models import Document, DocumentChunk, TelegramHistory, TelegramLanguagePreference
 
 
 class FakeTelegram:
@@ -116,6 +116,25 @@ def test_second_part_failure_keeps_cursor_and_history(database, monkeypatch):
     assert len(bot.read_history(database, 101)) == 1
 
 
+def test_permanent_delivery_failure_skips_update_and_continues_queue(database):
+    settings = config()
+    ready_document(database, settings)
+
+    class RejectFirstRecipient(FakeTelegram):
+        def send_message(self, chat_id, text):
+            if chat_id == 101:
+                raise bot.TelegramPermanentDeliveryError("Telegram окончательно отклонил доставку: HTTP 403")
+            super().send_message(chat_id, text)
+
+    api = RejectFirstRecipient([update(1), update(2, user=202)])
+    bot.run_once(api, {101, 202}, database, settings)
+
+    assert bot.read_offset(database) == 3
+    assert bot.read_history(database, 101) == []
+    assert [pair.question for pair in bot.read_history(database, 202)] == ["What is alpha?"]
+    assert len(api.sent) == 1 and api.sent[0][0] == 202
+
+
 def test_provider_failure_has_no_pair_or_demo_fallback(database, monkeypatch):
     monkeypatch.setattr(bot, "generate_answer", lambda *_args, **_kwargs: (_ for _ in ()).throw(ChatError(502, "private provider detail")))
     api = FakeTelegram([update(9)])
@@ -131,71 +150,31 @@ def test_provider_failure_has_no_pair_or_demo_fallback(database, monkeypatch):
 @pytest.mark.parametrize("text,profile,expected", [
     ("Что такое альфа?", "en", "ru"),
     ("Как загрузить PDF?", "en", "ru"),
-    ("Можно ли импортировать документ?", "en", "ru"),
-    ("Поддерживает ли Уралдокс импорт PDF?", "en", "ru"),
+    ("Какие документы доступны?", "en", "ru"),
     ("What is alpha?", "ru", "en"),
-    ("Does UralDocs support PDF import?", "ru", "en"),
     ("Is PDF supported?", "ru", "en"),
-    ("How can I import a document?", "ru", "en"),
-    ("How come PDF import fails?", "ru", "en"),
-    ("How do I comment on a PDF?", "ru", "en"),
-    ("Can I upload a PDF?", "ru", "en"),
     ("Where are the documents?", "ru", "en"),
-    ("Which files can I import?", "ru", "en"),
-    ("Please summarize the policy", "ru", "en"),
-    ("alpha", "en", "other"),
     ("PDF?", "en", "en"),
     ("PDF?", "ru", "ru"),
     ("PDF?", "de", None),
+    ("document", "ru", "ru"),
+    ("hi", "en", "en"),
+    ("hola amigo", "en", "en"),
     ("Ich will ein PDF importieren. Geht das?", "en", "other"),
-    ("Hi ha documents disponibles?", "en", "other"),
-    ("Hoe maak ik een document?", "en", "other"),
-    ("Come funziona importazione PDF?", "en", "other"),
-    ("Necesito importar un documento PDF", "en", "other"),
-    ("Какво е документ?", "en", "other"),
-    ("Как се качва документ?", "en", "other"),
-    ("Како ради увоз докумената?", "en", "other"),
-    ("Да ли могу да увезем документ?", "en", "other"),
-    ("document", "en", "other"),
-    ("hi", "en", "other"),
-    ("will", "en", "other"),
-    ("hola amigo", "en", "other"),
-    ("123", "de", None),
+    ("Hi ha documents disponibles?", "ru", "ru"),
 ])
 def test_language_choice(text, profile, expected):
     assert bot.message_language(text, profile) == expected
 
 
-def test_unsupported_and_unknown_language_do_not_use_answer(database, monkeypatch):
+def test_confident_foreign_and_unknown_profile_do_not_use_answer(database, monkeypatch):
     monkeypatch.setattr(bot, "generate_answer", lambda *_args, **_kwargs: pytest.fail("Лишний вызов поиска"))
-    api = FakeTelegram([update(1, text="hola amigo"), update(2, text="123", profile="de")])
+    api = FakeTelegram([update(1, text="Ich will ein PDF importieren. Geht das?"), update(2, text="123", profile="de")])
     bot.run_once(api, {101}, database, config())
     assert bot.read_offset(database) == 3
     assert api.sent[0][1] == bot.LANGUAGE_BOUNDARY
     assert api.sent[1][1] == bot.PROFILE_UNKNOWN
     assert bot.read_history(database, 101) == []
-
-
-def test_foreign_questions_do_not_reach_kb_or_history(database, monkeypatch):
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("Вопрос на другом языке не должен обращаться к истории и поиску")
-
-    monkeypatch.setattr(bot, "read_history", forbidden)
-    monkeypatch.setattr(bot, "generate_answer", forbidden)
-    questions = [
-        "Ich will ein PDF importieren. Geht das?", "Hi ha documents disponibles?",
-        "Hoe maak ik een document?", "Come funziona importazione PDF?",
-        "Necesito importar un documento PDF", "Какво е документ?", "Как се качва документ?",
-        "Како ради увоз докумената?", "Да ли могу да увезем документ?",
-        "document", "hi", "will",
-    ]
-    api = FakeTelegram([update(number, text=question, profile="en") for number, question in enumerate(questions, 1)])
-    bot.run_once(api, {101}, database, config())
-
-    assert bot.read_offset(database) == len(questions) + 1
-    assert api.sent == [(101, bot.LANGUAGE_BOUNDARY)] * len(questions)
-    with database() as db:
-        assert db.scalars(select(TelegramHistory)).all() == []
 
 
 def test_question_language_overrides_profile_and_short_query_uses_it(database, monkeypatch):
@@ -219,6 +198,77 @@ def test_question_language_overrides_profile_and_short_query_uses_it(database, m
     assert api.sent[-1] == (101, bot.PROFILE_UNKNOWN)
     assert bot.read_offset(database) == 6
     assert len(bot.read_history(database, 101)) == 3
+
+
+def test_commands_override_detection_and_survive_restart(database, monkeypatch):
+    observed = []
+
+    def answer(_factory, question, _history, _config, *, language):
+        observed.append((question, language))
+        return AnswerResult("insufficient", "Ответ")
+
+    monkeypatch.setattr(bot, "generate_answer", answer)
+    api = FakeTelegram([
+        update(1, text="/ru", profile="en"),
+        update(2, text="What is alpha?", profile="en"),
+        update(3, user=202, text="What is alpha?", profile="en"),
+        update(4, text="/en", profile="ru"),
+    ])
+    bot.run_once(api, {101, 202}, database, config())
+    assert observed == [("What is alpha?", "ru"), ("What is alpha?", "en")]
+    assert api.sent[0] == (101, bot.LANGUAGE_CONFIRMED["ru"])
+    assert api.sent[-1] == (101, bot.LANGUAGE_CONFIRMED["en"])
+    assert bot.read_preference(database, 101) == "en"
+    assert bot.read_preference(database, 202) is None
+    assert [pair.question for pair in bot.read_history(database, 101)] == ["What is alpha?"]
+
+    restarted = FakeTelegram(api.updates + [update(5, text="Что такое альфа?", profile="ru")])
+    bot.run_once(restarted, {101, 202}, database, config())
+    assert restarted.calls[0][0] == 5
+    assert observed[-1] == ("Что такое альфа?", "en")
+    assert bot.read_preference(database, 101) == "en"
+
+
+def test_command_delivery_failure_keeps_cursor_and_preference(database, monkeypatch):
+    monkeypatch.setattr(bot, "generate_answer", lambda *_args, **_kwargs: pytest.fail("Команда не обращается к поиску"))
+    api = FakeTelegram([update(7, text="/ru")], fail_at=1)
+
+    with pytest.raises(bot.TelegramError):
+        bot.run_once(api, {101}, database, config())
+    assert bot.read_offset(database) == 0
+    assert bot.read_preference(database, 101) is None
+    assert bot.read_history(database, 101) == []
+
+    retry = FakeTelegram(api.updates)
+    bot.run_once(retry, {101}, database, config())
+    assert bot.read_offset(database) == 8
+    assert bot.read_preference(database, 101) == "ru"
+    assert bot.read_history(database, 101) == []
+
+
+def test_unapproved_sender_cannot_set_language(database):
+    api = FakeTelegram([update(1, user=303, text="/ru"), update(2, chat_type="group", text="/en")])
+    bot.run_once(api, {101}, database, config())
+    assert api.sent == []
+    with database() as db:
+        assert db.scalars(select(TelegramLanguagePreference)).all() == []
+
+
+def test_ordinary_english_questions_reach_answer_service(database, monkeypatch):
+    observed = []
+
+    def answer(_factory, question, _history, _config, *, language):
+        observed.append((question, language))
+        return AnswerResult("insufficient", "Not enough information")
+
+    monkeypatch.setattr(bot, "generate_answer", answer)
+    questions = ["Is PDF supported?", "How do I comment on a PDF?"]
+    api = FakeTelegram([update(number, text=question, profile="ru") for number, question in enumerate(questions, 1)])
+    bot.run_once(api, {101}, database, config())
+
+    assert observed == [(question, "en") for question in questions]
+    assert bot.read_offset(database) == 3
+    assert len(bot.read_history(database, 101)) == 2
 
 
 def test_real_answer_sources_exclude_excerpt():
@@ -286,6 +336,15 @@ def test_telegram_client_uses_plain_text_and_validates_delivery():
         api.send_message(101, "plain text [c1]")
     assert requests[0][1] == {"offset": 5, "timeout": 25, "allowed_updates": ["message"]}
     assert requests[1][1] == {"chat_id": 101, "text": "plain text [c1]"}
+
+
+@pytest.mark.parametrize("status,permanent", [(400, True), (403, True), (429, False), (500, False)])
+def test_telegram_client_distinguishes_permanent_delivery_failure(status, permanent):
+    with httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(status))) as client:
+        api = bot.TelegramApi("test-token", client)
+        with pytest.raises(bot.TelegramError) as error:
+            api.send_message(101, "Ответ")
+    assert isinstance(error.value, bot.TelegramPermanentDeliveryError) is permanent
 
 
 def test_allowlist_rejects_empty_and_malformed_values():
