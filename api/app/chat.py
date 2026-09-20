@@ -114,10 +114,10 @@ def _candidate(chunk: DocumentChunk, filename: str) -> Candidate:
     )
 
 
-def _demo_search(db: Session, question: str, config: Settings, language: Literal["ru", "en"] | None = None) -> list[Candidate]:
+def _demo_search(db: Session, question: str, config: Settings) -> list[Candidate]:
     statement = select(DocumentChunk, Document.filename).join(Document).where(*_current_conditions(config))
     if db.bind.dialect.name == "postgresql":
-        search_language = "'russian'" if language == "ru" or (language is None and re.search(r"[А-Яа-яЁё]", question)) else "'english'"
+        search_language = "'russian'" if re.search(r"[А-Яа-яЁё]", question) else "'english'"
         vector = func.to_tsvector(literal_column(search_language), DocumentChunk.text)
         query = func.plainto_tsquery(literal_column(search_language), question)
         statement = statement.where(vector.op("@@")(query)).order_by(func.ts_rank_cd(vector, query).desc(), DocumentChunk.id)
@@ -313,7 +313,7 @@ def generate_answer(factory: sessionmaker[Session], question: str,
     recent_history = history[-3:]
     with factory() as db:
         available = _index_available(db, config)
-        candidates = _demo_search(db, question, config, language) if available and config.kb_mode == "demo" else []
+        candidates = _demo_search(db, question, config) if available and config.kb_mode == "demo" else []
 
     if not available:
         return AnswerResult("index_unavailable", _service_text("index_unavailable", language))

@@ -5,8 +5,8 @@ import pytest
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import sessionmaker
 
-from app.models import Base, TelegramCursor, TelegramHistory
-from app.telegram_bot import advance, read_history, read_offset
+from app.models import Base, TelegramCursor, TelegramHistory, TelegramLanguagePreference
+from app.telegram_bot import advance, read_history, read_offset, read_preference
 
 
 @pytest.fixture
@@ -47,3 +47,16 @@ def test_postgres_bigint_cursor_and_isolated_history(postgres_telegram_database)
         """)).all())
         assert columns["telegram_id"] == "bigint"
         assert columns["update_id"] == "bigint"
+
+
+def test_postgres_preference_isolated_and_updated_with_cursor(postgres_telegram_database):
+    factory = postgres_telegram_database
+    advance(factory, 1, preference=(101, "ru"))
+    advance(factory, 2, preference=(202, "en"))
+    assert read_preference(factory, 101) == "ru"
+    assert read_preference(factory, 202) == "en"
+    advance(factory, 3, preference=(101, "en"))
+    assert read_preference(factory, 101) == "en"
+    assert read_preference(factory, 202) == "en"
+    with factory() as db:
+        assert len(db.scalars(select(TelegramLanguagePreference)).all()) == 2

@@ -12,13 +12,14 @@ from app.chat import AnswerResult, ChatError, HistoryPair, generate_answer
 from app.config import Settings, settings
 from app.db import SessionLocal
 from app.language_id import load_language_model, question_language
-from app.models import TelegramCursor, TelegramHistory
+from app.models import TelegramCursor, TelegramHistory, TelegramLanguagePreference
 
 logger = logging.getLogger("uraldocs.telegram")
 Language = Literal["ru", "en"]
 MAX_MESSAGE_CHARS = 3900
 LANGUAGE_BOUNDARY = "Поддерживаются вопросы на русском и английском. / Please ask in Russian or English."
 PROFILE_UNKNOWN = "Язык вопроса и профиля не определён. Напишите по-русски или по-английски. / Language unclear. Please ask in Russian or English."
+LANGUAGE_CONFIRMED = {"ru": "Язык ответов: русский.", "en": "Answer language: English."}
 
 
 class TelegramError(Exception):
@@ -127,7 +128,14 @@ def read_history(factory: sessionmaker[Session], telegram_id: int) -> list[Histo
         return [HistoryPair(row.question, row.answer) for row in reversed(rows)]
 
 
-def advance(factory: sessionmaker[Session], update_id: int, pair: tuple[int, str, str] | None = None) -> None:
+def read_preference(factory: sessionmaker[Session], telegram_id: int) -> Language | None:
+    with factory() as db:
+        preference = db.get(TelegramLanguagePreference, telegram_id)
+        return preference.language if preference else None
+
+
+def advance(factory: sessionmaker[Session], update_id: int, pair: tuple[int, str, str] | None = None,
+            preference: tuple[int, Language] | None = None) -> None:
     with factory.begin() as db:
         cursor = db.scalar(select(TelegramCursor).where(TelegramCursor.id == 1).with_for_update())
         if cursor is None:
@@ -136,6 +144,13 @@ def advance(factory: sessionmaker[Session], update_id: int, pair: tuple[int, str
             db.flush()
         if update_id < cursor.next_update_id:
             return
+        if preference is not None:
+            telegram_id, language = preference
+            selected = db.get(TelegramLanguagePreference, telegram_id)
+            if selected is None:
+                db.add(TelegramLanguagePreference(telegram_id=telegram_id, language=language))
+            else:
+                selected.language = language
         if pair is not None:
             telegram_id, question, answer = pair
             db.add(TelegramHistory(telegram_id=telegram_id, update_id=update_id, question=question, answer=answer))
@@ -174,7 +189,12 @@ def process_update(update: dict, allowed: set[int], factory: sessionmaker[Sessio
     if not isinstance(question, str) or not question.strip():
         advance(factory, update_id)
         return
-    language = message_language(question, sender.get("language_code"))
+    if question.strip() in ("/ru", "/en"):
+        selected_language: Language = question.strip()[1:]
+        _deliver(api, chat_id, LANGUAGE_CONFIRMED[selected_language])
+        advance(factory, update_id, preference=(sender_id, selected_language))
+        return
+    language = read_preference(factory, sender_id) or message_language(question, sender.get("language_code"))
     if language == "other":
         _deliver(api, chat_id, LANGUAGE_BOUNDARY)
         advance(factory, update_id)

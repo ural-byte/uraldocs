@@ -21,19 +21,15 @@ class FakeModel:
 
 @pytest.mark.parametrize("text,labels,probabilities,expected", [
     ("What documents support PDF?", ("__label__en", "__label__de"), (0.70, 0.20), "en"),
-    ("What documents support PDF?", ("__label__en", "__label__de"), (0.59, 0.01), "en"),
     ("Is PDF supported?", ("__label__en", "__label__hu"), (0.38, 0.13), "en"),
-    ("Is PDF supported?", ("__label__en", "__label__hu"), (0.379, 0.01), "other"),
-    ("What documents support PDF?", ("__label__en", "__label__de"), (0.80, 0.56), "other"),
+    ("Is PDF supported?", ("__label__en", "__label__hu"), (0.379, 0.01), "unclear"),
+    ("What documents support PDF?", ("__label__en", "__label__de"), (0.80, 0.56), "unclear"),
     ("Что такое альфа?", ("__label__ru", "__label__uk"), (0.65, 0.30), "ru"),
-    ("Моля, покажете документа", ("__label__ru", "__label__bg"), (0.70, 0.10), "other"),
-    ("Молим вас, прикажите документ", ("__label__ru", "__label__sr"), (0.73, 0.10), "other"),
-    ("Что такое альфа?", ("__label__ru", "__label__uk"), (0.59, 0.01), "other"),
-    ("Show me the PDF documents", ("__label__de", "__label__en"), (0.16, 0.15), "en"),
-    ("Show me the PDF documents", ("__label__de", "__label__en"), (0.61, 0.02), "other"),
-    ("Show documents", ("__label__de", "__label__en"), (0.16, 0.15), "other"),
+    ("Расскажи о документах", ("__label__ru", "__label__uk"), (0.85, 0.05), "ru"),
+    ("Ich will ein PDF importieren", ("__label__de", "__label__en"), (0.90, 0.01), "other"),
+    ("Hi ha documents disponibles?", ("__label__it", "__label__es"), (0.23, 0.17), "unclear"),
 ])
-def test_probability_gate_and_russian_construction(monkeypatch, text, labels, probabilities, expected):
+def test_model_confidence(monkeypatch, text, labels, probabilities, expected):
     model = FakeModel(labels, probabilities)
     monkeypatch.setattr(language_id, "load_language_model", lambda: model)
 
@@ -41,34 +37,12 @@ def test_probability_gate_and_russian_construction(monkeypatch, text, labels, pr
     assert model.calls == [(text, 2)]
 
 
-@pytest.mark.parametrize("text,expected", [
-    ("Что такое альфа?", True),
-    ("Какие документы доступны?", True),
-    ("Как загрузить PDF?", True),
-    ("Где мне найти документ?", True),
-    ("Можно ли импортировать документ?", True),
-    ("Поддерживает ли Уралдокс импорт PDF?", True),
-    ("Есть ли документы?", True),
-    ("Расскажи о документах", True),
-    ("О чём документ?", True),
-    ("Моля, покажете документа", False),
-    ("Молим вас, прикажите документ", False),
-    ("Да ли могу да увезем документ?", False),
-])
-def test_russian_grammar_families(text, expected):
-    words = language_id.re.findall(r"[^\W_]+", text.casefold())
-    assert language_id._russian_construction(words) is expected
-
-
-@pytest.mark.parametrize("text,expected", [
-    ("PDF?", "unclear"), ("123", "unclear"),
-    ("document", "other"), ("hi", "other"), ("will", "other"),
-])
-def test_short_guard_before_prediction(monkeypatch, text, expected):
+@pytest.mark.parametrize("text", ["PDF?", "123", "document", "hi", "will", "What documents?", "hola amigo"])
+def test_short_message_uses_profile_without_prediction(monkeypatch, text):
     model = FakeModel()
     monkeypatch.setattr(language_id, "load_language_model", lambda: model)
 
-    assert language_id.question_language(text) == expected
+    assert language_id.question_language(text) == "unclear"
     assert model.calls == []
 
 

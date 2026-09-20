@@ -150,6 +150,17 @@ class TelegramHistory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class TelegramLanguagePreference(Base):
+    __tablename__ = "telegram_language_preferences"
+    __table_args__ = (
+        CheckConstraint("telegram_id > 0", name="ck_telegram_language_preferences_user"),
+        CheckConstraint("language IN ('ru', 'en')", name="ck_telegram_language_preferences_language"),
+    )
+
+    telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    language: Mapped[str] = mapped_column(String(2), nullable=False)
+
+
 DocumentChunk.__table__.append_constraint(
     Index(
         "ix_document_chunks_text_search",
