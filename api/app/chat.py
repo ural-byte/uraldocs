@@ -16,6 +16,18 @@ from app.worker import create_embeddings
 INSUFFICIENT_TEXT = "Недостаточно информации в базе знаний для ответа на вопрос."
 INDEX_UNAVAILABLE_TEXT = "Индекс документов недоступен для текущей конфигурации."
 DEMO_TEXT = "Демо-режим: ИИ-ответ не формируется. Ниже приведены найденные выдержки."
+EN_INSUFFICIENT_TEXT = "The knowledge base does not contain enough information to answer this question."
+EN_INDEX_UNAVAILABLE_TEXT = "The document index is unavailable for the current configuration."
+EN_DEMO_TEXT = "Demo mode: no AI answer is generated. Matching excerpts are shown below."
+
+
+def _service_text(kind: Literal["demo", "insufficient", "index_unavailable"], language: Literal["ru", "en"] | None) -> str:
+    texts = (
+        {"demo": EN_DEMO_TEXT, "insufficient": EN_INSUFFICIENT_TEXT, "index_unavailable": EN_INDEX_UNAVAILABLE_TEXT}
+        if language == "en" else
+        {"demo": DEMO_TEXT, "insufficient": INSUFFICIENT_TEXT, "index_unavailable": INDEX_UNAVAILABLE_TEXT}
+    )
+    return texts[kind]
 
 
 class ChatError(Exception):
@@ -105,9 +117,9 @@ def _candidate(chunk: DocumentChunk, filename: str) -> Candidate:
 def _demo_search(db: Session, question: str, config: Settings) -> list[Candidate]:
     statement = select(DocumentChunk, Document.filename).join(Document).where(*_current_conditions(config))
     if db.bind.dialect.name == "postgresql":
-        language = "'russian'" if re.search(r"[А-Яа-яЁё]", question) else "'english'"
-        vector = func.to_tsvector(literal_column(language), DocumentChunk.text)
-        query = func.plainto_tsquery(literal_column(language), question)
+        search_language = "'russian'" if re.search(r"[А-Яа-яЁё]", question) else "'english'"
+        vector = func.to_tsvector(literal_column(search_language), DocumentChunk.text)
+        query = func.plainto_tsquery(literal_column(search_language), question)
         statement = statement.where(vector.op("@@")(query)).order_by(func.ts_rank_cd(vector, query).desc(), DocumentChunk.id)
         rows = db.execute(statement.limit(config.chat_top_k)).all()
     else:
@@ -165,7 +177,8 @@ def _history(db: Session, conversation_id: int) -> list[HistoryPair]:
     return [HistoryPair(user_text, answer_text) for user_text, answer_text in reversed(rows)]
 
 
-def _chat_completion(question: str, history: Sequence[HistoryPair], candidates: list[Candidate], config: Settings) -> AnswerResult:
+def _chat_completion(question: str, history: Sequence[HistoryPair], candidates: list[Candidate], config: Settings,
+                     language: Literal["ru", "en"] | None = None) -> AnswerResult:
     if not config.ai_chat_model:
         raise ChatError(503, "AI_CHAT_MODEL не настроена")
     by_citation = {f"c{number}": candidate for number, candidate in enumerate(candidates, start=1)}
@@ -177,6 +190,11 @@ def _chat_completion(question: str, history: Sequence[HistoryPair], candidates: 
         for citation_id, candidate in by_citation.items()
     ]
     system = (
+        "Answer the current question in English using only excerpts in sources. History helps interpret the question "
+        "but is not evidence. Return only JSON: "
+        '{"insufficient":false,"answer":"text","citation_ids":["c1"]} '
+        'or {"insufficient":true,"citation_ids":[]}. Do not cite IDs outside sources.'
+        if language == "en" else
         "Ответь на текущий вопрос только по выдержкам sources. История помогает понять контекст, "
         "но не служит источником фактов. Верни только JSON: "
         '{"insufficient":false,"answer":"текст","citation_ids":["c1"]} '
@@ -221,7 +239,7 @@ def _chat_completion(question: str, history: Sequence[HistoryPair], candidates: 
     if result["insufficient"]:
         if citation_ids:
             raise ChatError(502, "API генерации вернул некорректные ссылки на источники")
-        return AnswerResult("insufficient", INSUFFICIENT_TEXT)
+        return AnswerResult("insufficient", _service_text("insufficient", language))
     answer = result.get("answer")
     if not isinstance(answer, str) or not answer.strip() or len(answer) > config.chat_max_answer_chars:
         raise ChatError(502, "API генерации вернул некорректный текст ответа")
@@ -289,7 +307,8 @@ def _save_pair(factory: sessionmaker[Session], conversation_id: int, owner_id: i
 
 
 def generate_answer(factory: sessionmaker[Session], question: str,
-                    history: Sequence[HistoryPair], config: Settings) -> AnswerResult:
+                    history: Sequence[HistoryPair], config: Settings,
+                    language: Literal["ru", "en"] | None = None) -> AnswerResult:
     question = _validate_question(question, config)
     recent_history = history[-3:]
     with factory() as db:
@@ -297,9 +316,9 @@ def generate_answer(factory: sessionmaker[Session], question: str,
         candidates = _demo_search(db, question, config) if available and config.kb_mode == "demo" else []
 
     if not available:
-        return AnswerResult("index_unavailable", INDEX_UNAVAILABLE_TEXT)
+        return AnswerResult("index_unavailable", _service_text("index_unavailable", language))
     if config.kb_mode == "demo":
-        return AnswerResult("demo", DEMO_TEXT, tuple(candidates)) if candidates else AnswerResult("insufficient", INSUFFICIENT_TEXT)
+        return AnswerResult("demo", _service_text("demo", language), tuple(candidates)) if candidates else AnswerResult("insufficient", _service_text("insufficient", language))
     if not config.ai_chat_model:
         raise ChatError(503, "AI_CHAT_MODEL не настроена")
     try:
@@ -311,10 +330,13 @@ def generate_answer(factory: sessionmaker[Session], question: str,
         compatible = _index_available(db, config, len(vector))
         candidates = _real_search(db, vector, config) if compatible else []
     if not compatible:
-        return AnswerResult("index_unavailable", INDEX_UNAVAILABLE_TEXT)
+        return AnswerResult("index_unavailable", _service_text("index_unavailable", language))
     if not candidates:
-        return AnswerResult("insufficient", INSUFFICIENT_TEXT)
-    return _chat_completion(question, recent_history, candidates, config)
+        return AnswerResult("insufficient", _service_text("insufficient", language))
+    return (
+        _chat_completion(question, recent_history, candidates, config)
+        if language is None else _chat_completion(question, recent_history, candidates, config, language)
+    )
 
 
 def answer_question(factory: sessionmaker[Session], owner_id: int, conversation_id: int,

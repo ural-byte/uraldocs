@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     chat_max_excerpt_chars: int = Field(default=500, ge=1, le=1200)
     worker_lease_seconds: int = Field(default=300, gt=0)
     max_upload_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    telegram_bot_token: str = ""
+    telegram_allowed_ids: str = ""
+    telegram_poll_timeout_seconds: int = Field(default=25, ge=1, le=50)
 
     @model_validator(mode="after")
     def validate_ai(self) -> Self:

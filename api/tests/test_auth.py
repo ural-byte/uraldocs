@@ -17,6 +17,7 @@ def test_health_and_login_logout(client, users):
     assert client.get("/health/live").json() == {"status": "ok"}
     assert client.get("/health/ready").json() == {"status": "ok"}
     assert client.get("/auth/me").status_code == 401
+    assert client.get("/ui/config").status_code == 401
     assert login(client, password="incorrect").status_code == 401
     response = login(client)
     assert response.status_code == 200
@@ -24,6 +25,11 @@ def test_health_and_login_logout(client, users):
     assert "httponly" in response.headers["set-cookie"].lower()
     assert "samesite=lax" in response.headers["set-cookie"].lower()
     assert client.get("/auth/me").json()["username"] == "admin"
+    assert client.get("/ui/config").json() == {
+        "kb_mode": settings.kb_mode,
+        "max_upload_bytes": settings.max_upload_bytes,
+        "chat_max_question_chars": settings.chat_max_question_chars,
+    }
     assert client.post("/auth/logout", headers=ORIGIN).status_code == 204
     assert client.get("/auth/me").status_code == 401
 

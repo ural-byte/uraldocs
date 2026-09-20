@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, LargeBinary, String, Text, func, literal_column
+from sqlalchemy import JSON, BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, LargeBinary, String, Text, func, literal_column
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 
@@ -123,6 +123,42 @@ class MessageSource(Base):
     excerpt: Mapped[str | None] = mapped_column(Text)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     message: Mapped[Message] = relationship(back_populates="sources")
+
+
+class TelegramCursor(Base):
+    __tablename__ = "telegram_cursor"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_telegram_cursor_singleton"),
+        CheckConstraint("next_update_id >= 0", name="ck_telegram_cursor_offset"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    next_update_id: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+
+
+class TelegramHistory(Base):
+    __tablename__ = "telegram_history"
+    __table_args__ = (
+        CheckConstraint("telegram_id > 0", name="ck_telegram_history_user"),
+        CheckConstraint("update_id >= 0", name="ck_telegram_history_update"),
+    )
+
+    telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    answer: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TelegramLanguagePreference(Base):
+    __tablename__ = "telegram_language_preferences"
+    __table_args__ = (
+        CheckConstraint("telegram_id > 0", name="ck_telegram_language_preferences_user"),
+        CheckConstraint("language IN ('ru', 'en')", name="ck_telegram_language_preferences_language"),
+    )
+
+    telegram_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    language: Mapped[str] = mapped_column(String(2), nullable=False)
 
 
 DocumentChunk.__table__.append_constraint(

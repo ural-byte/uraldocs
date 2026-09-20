@@ -84,6 +84,41 @@ def test_shared_answer_service_needs_no_web_user_or_conversation(database, embed
         assert db.scalars(select(Conversation)).all() == []
 
 
+def test_shared_answer_service_localizes_service_states_without_web_user(database):
+    config = Settings(database_url="sqlite+pysqlite://", kb_mode="demo")
+    ready_document(database, config)
+
+    demo = chat.generate_answer(database, "alpha", [], config, language="en")
+    insufficient = chat.generate_answer(database, "unknown", [], config, language="en")
+
+    assert demo.kind == "demo" and "no AI answer" in demo.text and len(demo.sources) == 1
+    assert insufficient.kind == "insufficient" and "enough information" in insufficient.text
+    with database() as db:
+        db.query(DocumentChunk).delete()
+        db.query(Document).delete()
+        db.commit()
+    unavailable = chat.generate_answer(database, "alpha", [], config, language="en")
+    assert unavailable.kind == "index_unavailable" and "index is unavailable" in unavailable.text
+
+
+def test_shared_answer_service_requests_english_without_changing_web_default(database, embeddings_server):
+    config = real_config(embeddings_server)
+    ready_document(database, config)
+
+    def answer(request):
+        if embeddings_server.requests[-1][0].endswith("/embeddings"):
+            return {"data": [{"index": 0, "embedding": [1.0, 0.0]}]}
+        return {"choices": [{"message": {"content": json.dumps({
+            "insufficient": False, "answer": "There is a mountain route.", "citation_ids": ["c1"],
+        })}}]}
+
+    embeddings_server.payload = answer
+    result = chat.generate_answer(database, "alpha", [], config, language="en")
+
+    assert result.kind == "answer" and result.text == "There is a mountain route."
+    assert "in English" in embeddings_server.requests[-1][2]["messages"][0]["content"]
+
+
 def test_demo_history_isolation_and_source_deletion(client, database, users):
     config = Settings(database_url="sqlite+pysqlite://", kb_mode="demo")
     document_id = ready_document(database, config)
