@@ -1,0 +1,57 @@
+stages:
+  - test
+
+backend:
+  stage: test
+  image: python:3.12-slim
+  services:
+    - name: pgvector/pgvector:pg16
+      alias: postgres
+  variables:
+    POSTGRES_DB: uraldocs_test
+    POSTGRES_HOST_AUTH_METHOD: trust
+    DATABASE_URL: postgresql+psycopg://postgres@postgres:5432/uraldocs_test
+    TEST_POSTGRES_URL: postgresql+psycopg://postgres@postgres:5432/uraldocs_test
+    PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  before_script:
+    - cd api
+    - pip install -r requirements-dev.txt
+  script:
+    - |
+      python - <<'PYCODE'
+      import time
+      import psycopg
+
+      for attempt in range(30):
+          try:
+              with psycopg.connect("host=postgres dbname=uraldocs_test user=postgres", connect_timeout=1):
+                  break
+          except psycopg.OperationalError:
+              if attempt == 29:
+                  raise
+              time.sleep(1)
+      PYCODE
+    - alembic upgrade head
+    - pytest -q --junitxml=pytest-report.xml
+    - |
+      python - <<'PYCODE'
+      from xml.etree import ElementTree
+      report = ElementTree.parse("pytest-report.xml").getroot()
+      skipped = int(report.find("testsuite").attrib.get("skipped", "0"))
+      if skipped:
+          raise SystemExit(f"Пропущено backend-тестов: {skipped}")
+      PYCODE
+    - cd .. && python -m unittest discover -s tools -p 'test_*.py'
+
+frontend:
+  stage: test
+  image: node:22
+  variables:
+    NEXT_TELEMETRY_DISABLED: "1"
+  before_script:
+    - cd web
+    - npm ci
+  script:
+    - npm run lint
+    - npm run typecheck
+    - npm run build

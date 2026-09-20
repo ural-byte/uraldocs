@@ -56,6 +56,14 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  mock-ai:
+    profiles: ["mock-ai"]
+    image: python:3.12-slim
+    working_dir: /app
+    volumes:
+      - ./tools/mock_ai.py:/app/mock_ai.py:ro
+    command: ["python", "/app/mock_ai.py"]
+
   web:
     build: ./web
     environment:
