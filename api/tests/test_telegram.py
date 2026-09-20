@@ -116,6 +116,25 @@ def test_second_part_failure_keeps_cursor_and_history(database, monkeypatch):
     assert len(bot.read_history(database, 101)) == 1
 
 
+def test_permanent_delivery_failure_skips_update_and_continues_queue(database):
+    settings = config()
+    ready_document(database, settings)
+
+    class RejectFirstRecipient(FakeTelegram):
+        def send_message(self, chat_id, text):
+            if chat_id == 101:
+                raise bot.TelegramPermanentDeliveryError("Telegram окончательно отклонил доставку: HTTP 403")
+            super().send_message(chat_id, text)
+
+    api = RejectFirstRecipient([update(1), update(2, user=202)])
+    bot.run_once(api, {101, 202}, database, settings)
+
+    assert bot.read_offset(database) == 3
+    assert bot.read_history(database, 101) == []
+    assert [pair.question for pair in bot.read_history(database, 202)] == ["What is alpha?"]
+    assert len(api.sent) == 1 and api.sent[0][0] == 202
+
+
 def test_provider_failure_has_no_pair_or_demo_fallback(database, monkeypatch):
     monkeypatch.setattr(bot, "generate_answer", lambda *_args, **_kwargs: (_ for _ in ()).throw(ChatError(502, "private provider detail")))
     api = FakeTelegram([update(9)])
@@ -317,6 +336,15 @@ def test_telegram_client_uses_plain_text_and_validates_delivery():
         api.send_message(101, "plain text [c1]")
     assert requests[0][1] == {"offset": 5, "timeout": 25, "allowed_updates": ["message"]}
     assert requests[1][1] == {"chat_id": 101, "text": "plain text [c1]"}
+
+
+@pytest.mark.parametrize("status,permanent", [(400, True), (403, True), (429, False), (500, False)])
+def test_telegram_client_distinguishes_permanent_delivery_failure(status, permanent):
+    with httpx.Client(transport=httpx.MockTransport(lambda _request: httpx.Response(status))) as client:
+        api = bot.TelegramApi("test-token", client)
+        with pytest.raises(bot.TelegramError) as error:
+            api.send_message(101, "Ответ")
+    assert isinstance(error.value, bot.TelegramPermanentDeliveryError) is permanent
 
 
 def test_allowlist_rejects_empty_and_malformed_values():

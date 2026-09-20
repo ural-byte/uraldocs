@@ -26,6 +26,10 @@ class TelegramError(Exception):
     pass
 
 
+class TelegramPermanentDeliveryError(TelegramError):
+    pass
+
+
 def allowed_ids(config: Settings) -> set[int]:
     values = [part.strip() for part in config.telegram_allowed_ids.split(",")]
     if not values or any(not value.isdecimal() or int(value) <= 0 for value in values):
@@ -92,6 +96,10 @@ class TelegramApi:
         except (httpx.RequestError, httpx.InvalidURL):
             raise TelegramError("Не удалось связаться с Telegram API") from None
         if response.status_code != 200:
+            if method == "sendMessage" and response.status_code in (400, 403):
+                raise TelegramPermanentDeliveryError(
+                    f"Telegram окончательно отклонил доставку: HTTP {response.status_code}"
+                )
             raise TelegramError(f"Telegram API вернул HTTP {response.status_code}")
         try:
             body = response.json()
@@ -230,7 +238,11 @@ def run_once(api: TelegramApi, allowed: set[int], factory: sessionmaker[Session]
             raise TelegramError("Telegram API вернул обновление без корректного ID")
         if update_id < offset:
             continue
-        process_update(update, allowed, factory, config, api)
+        try:
+            process_update(update, allowed, factory, config, api)
+        except TelegramPermanentDeliveryError as exc:
+            logger.warning("Обновление %s пропущено после окончательного отказа доставки: %s", update_id, exc)
+            advance(factory, update_id)
         offset = update_id + 1
     return len(ordered)
 
