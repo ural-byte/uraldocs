@@ -152,8 +152,11 @@ pytest -q
 
 ```sh
 docker compose up -d --wait db
-docker compose run --rm --no-deps -v "$PWD/api:/app" api sh -c 'pip install -q -r requirements-dev.txt && TEST_POSTGRES_URL="$(python -c "from app.config import settings; print(settings.database_url)")" pytest -q'
+docker compose run --rm migrate
+docker compose run --rm --no-deps -e APP_ORIGIN=http://localhost:3000 -e KB_MODE=demo -e AI_BASE_URL= -e AI_API_KEY= -e AI_EMBEDDING_MODEL= -e AI_CHAT_MODEL= -v "$PWD/api:/app" api sh -c 'pip install -q -r requirements-dev.txt && TEST_POSTGRES_URL="$(python -c "from app.config import settings; print(settings.database_url)")" pytest -q'
 ```
+
+Миграции создают расширение `vector` в свежей БД. Параметры `-e` действуют только внутри тестового контейнера `api` и не меняют `.env` работающих сервисов. URL PostgreSQL берётся из текущего настроенного окружения; команда передаёт его тестам через обязательный `TEST_POSTGRES_URL`.
 
 Локальный тестовый AI-сервер проверяется отдельно: `python3 -m unittest discover -s tools -p "test_*.py"`. Бот без реального токена проверяется в backend suite тестами `test_telegram.py`, `test_telegram_postgres.py` и `test_language_id.py` с подменённым Telegram API. Для живой проверки добавьте собственный токен и свой Telegram ID в `.env`, выполните `docker compose --profile telegram up -d --build telegram`, отправьте `/ru`, `/en` и вопросы по образцам из разрешённого личного чата. `TELEGRAM_ALLOWED_IDS` принимает список числовых ID через запятую; посторонние ID не получают ответ. История трёх последних пар и выбор языка сохраняются в PostgreSQL.
 
