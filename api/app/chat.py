@@ -1,6 +1,7 @@
 import json
 import math
 import re
+import unicodedata
 from dataclasses import dataclass, replace
 from typing import Literal, Sequence
 
@@ -19,6 +20,7 @@ DEMO_TEXT = "Демо-режим: ИИ-ответ не формируется. �
 EN_INSUFFICIENT_TEXT = "The knowledge base does not contain enough information to answer this question."
 EN_INDEX_UNAVAILABLE_TEXT = "The document index is unavailable for the current configuration."
 EN_DEMO_TEXT = "Demo mode: no AI answer is generated. Matching excerpts are shown below."
+PROJECT_OVERVIEW_INTENT = "про что проект"
 
 
 def _service_text(kind: Literal["demo", "insufficient", "index_unavailable"], language: Literal["ru", "en"] | None) -> str:
@@ -114,7 +116,31 @@ def _candidate(chunk: DocumentChunk, filename: str) -> Candidate:
     )
 
 
+def _normalized_intent(question: str) -> str:
+    normalized = unicodedata.normalize("NFKC", question).casefold()
+    return " ".join(re.findall(r"\w+", normalized))
+
+
+def _project_overview(db: Session, config: Settings) -> Candidate | None:
+    row = db.execute(
+        select(DocumentChunk, Document.filename)
+        .join(Document)
+        .where(
+            *_current_conditions(config),
+            func.lower(Document.filename) == "readme.md",
+            DocumentChunk.chunk_index == 0,
+        )
+        .order_by(Document.id.desc())
+        .limit(1)
+    ).first()
+    return _candidate(*row) if row is not None else None
+
+
 def _demo_search(db: Session, question: str, config: Settings) -> list[Candidate]:
+    if _normalized_intent(question) == PROJECT_OVERVIEW_INTENT:
+        overview = _project_overview(db, config)
+        if overview is not None:
+            return [overview]
     statement = select(DocumentChunk, Document.filename).join(Document).where(*_current_conditions(config))
     if db.bind.dialect.name == "postgresql":
         search_language = "'russian'" if re.search(r"[А-Яа-яЁё]", question) else "'english'"
