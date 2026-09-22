@@ -101,7 +101,7 @@ def _extract_markdown_chunks(lines: list[str]) -> list[ExtractedChunk]:
             marker = fence_match.group(1)
             if fence is None:
                 fence = (marker[0], len(marker))
-            elif marker[0] == fence[0] and len(marker) >= fence[1]:
+            elif re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{fence[1]},}}[ \t]*", line):
                 fence = None
     flush_section()
     return chunks

@@ -62,6 +62,26 @@ def test_markdown_headings_are_hard_chunk_boundaries():
     assert all(len(chunk.text) <= kb.CHUNK_CHAR_LIMIT for chunk in chunks)
 
 
+def test_markdown_fence_with_info_text_does_not_close_code_block():
+    original = (
+        "# Раздел\n"
+        "```text\n"
+        "```markdown\n"
+        "## Заголовок внутри кода\n"
+        "```   \n"
+        "## Следующий раздел\n"
+        "Текст\n"
+    ).encode()
+
+    chunks = kb.extract_chunks(original, "md")
+
+    assert [chunk.text for chunk in chunks] == [
+        "# Раздел ```text ```markdown ## Заголовок внутри кода ```",
+        "## Следующий раздел Текст",
+    ]
+    assert [(chunk.line_start, chunk.line_end) for chunk in chunks] == [(1, 5), (6, 7)]
+
+
 def test_repository_readme_first_chunk_is_project_overview():
     readme = Path(__file__).resolve().parents[2] / "README.md"
 
