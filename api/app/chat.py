@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Literal, Sequence
 
 import httpx
-from sqlalchemy import case, func, literal_column, select
+from sqlalchemy import case, func, literal_column, or_, select
 from sqlalchemy.orm import Session, aliased, defer, sessionmaker
 
 from app.config import Settings
@@ -141,7 +141,10 @@ def _demo_search(db: Session, question: str, config: Settings) -> list[Candidate
         overview = _project_overview(db, config)
         if overview is not None:
             return [overview]
-    statement = select(DocumentChunk, Document.filename).join(Document).where(*_current_conditions(config))
+    statement = select(DocumentChunk, Document.filename).join(Document).where(
+        *_current_conditions(config),
+        or_(func.lower(Document.filename) != "readme.md", DocumentChunk.chunk_index == 0),
+    )
     if db.bind.dialect.name == "postgresql":
         search_language = "'russian'" if re.search(r"[А-Яа-яЁё]", question) else "'english'"
         vector = func.to_tsvector(literal_column(search_language), DocumentChunk.text)

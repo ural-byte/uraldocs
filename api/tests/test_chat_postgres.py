@@ -187,6 +187,9 @@ def test_postgres_worker_indexes_real_examples_and_project_overview(postgres_cha
     deadline = generate_answer(
         postgres_chat_database, "Какой срок подачи заявки проекта Лазурь?", [], config,
     )
+    unsupported = generate_answer(
+        postgres_chat_database, "Каков бюджет проекта Лазурь?", [], config,
+    )
 
     assert overview.kind == "demo"
     assert len(overview.sources) == 1
@@ -196,6 +199,8 @@ def test_postgres_worker_indexes_real_examples_and_project_overview(postgres_cha
     assert deadline.kind == "demo"
     assert deadline.sources[0].filename == "lazur.txt"
     assert "12 мая 2027 года" in deadline.sources[0].text
+    assert unsupported.kind == "insufficient"
+    assert unsupported.sources == ()
 
 
 def test_postgres_project_overview_falls_back_to_fts_for_stale_readme(postgres_chat_database):
