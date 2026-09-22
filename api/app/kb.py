@@ -9,6 +9,8 @@ from pypdf import PdfReader
 from app.config import Settings
 
 MAX_FLOAT32 = 3.4028234663852886e38
+INDEX_FORMAT_VERSION = 3
+CHUNK_CHAR_LIMIT = 1200
 
 
 @dataclass(frozen=True)
@@ -20,13 +22,13 @@ class ExtractedChunk:
 
 
 def config_signature(config: Settings) -> str:
-    source = config.kb_mode
+    source = f"{INDEX_FORMAT_VERSION}\0{config.kb_mode}"
     if config.kb_mode == "real_ai":
         source += f"\0{config.ai_base_url.rstrip('/')}\0{config.ai_embedding_model}"
     return hashlib.sha256(source.encode()).hexdigest()
 
 
-def _split_text(text: str, limit: int = 1200) -> list[str]:
+def _split_text(text: str, limit: int = CHUNK_CHAR_LIMIT) -> list[str]:
     text = re.sub(r"\s+", " ", text).strip()
     pieces = []
     start = 0
@@ -42,6 +44,67 @@ def _split_text(text: str, limit: int = 1200) -> list[str]:
         while start < len(text) and text[start] == " ":
             start += 1
     return pieces
+
+
+def _extract_line_chunks(lines: list[tuple[int, str]]) -> list[ExtractedChunk]:
+    chunks: list[ExtractedChunk] = []
+    buffer: list[str] = []
+    buffer_length = 0
+    start = 0
+    end = 0
+
+    def flush() -> None:
+        nonlocal buffer_length
+        if buffer:
+            chunks.append(ExtractedChunk(" ".join(buffer), line_start=start, line_end=end))
+            buffer.clear()
+            buffer_length = 0
+
+    for number, line in lines:
+        normalized = re.sub(r"\s+", " ", line).strip()
+        if not normalized:
+            continue
+        if len(normalized) > CHUNK_CHAR_LIMIT:
+            flush()
+            chunks.extend(ExtractedChunk(part, line_start=number, line_end=number) for part in _split_text(normalized))
+            continue
+        if buffer and buffer_length + 1 + len(normalized) > CHUNK_CHAR_LIMIT:
+            flush()
+        if not buffer:
+            start = number
+        else:
+            buffer_length += 1
+        buffer.append(normalized)
+        buffer_length += len(normalized)
+        end = number
+    flush()
+    return chunks
+
+
+def _extract_markdown_chunks(lines: list[str]) -> list[ExtractedChunk]:
+    chunks: list[ExtractedChunk] = []
+    section: list[tuple[int, str]] = []
+    fence: tuple[str, int] | None = None
+
+    def flush_section() -> None:
+        if section:
+            chunks.extend(_extract_line_chunks(section))
+            section.clear()
+
+    for number, line in enumerate(lines, start=1):
+        fence_match = re.match(r" {0,3}(`{3,}|~{3,})", line)
+        is_heading = fence is None and re.match(r" {0,3}#{1,6}(?:[ \t]+|$)", line) is not None
+        if is_heading:
+            flush_section()
+        section.append((number, line))
+        if fence_match:
+            marker = fence_match.group(1)
+            if fence is None:
+                fence = (marker[0], len(marker))
+            elif re.fullmatch(rf" {{0,3}}{re.escape(fence[0])}{{{fence[1]},}}[ \t]*", line):
+                fence = None
+    flush_section()
+    return chunks
 
 
 def extract_chunks(original: bytes, file_type: str) -> list[ExtractedChunk]:
@@ -63,37 +126,11 @@ def extract_chunks(original: bytes, file_type: str) -> list[ExtractedChunk]:
         lines = original.decode("utf-8-sig").splitlines()
     except UnicodeDecodeError as exc:
         raise ValueError("Текстовый файл должен быть в кодировке UTF-8") from exc
-    chunks: list[ExtractedChunk] = []
-    buffer: list[str] = []
-    buffer_length = 0
-    start = 0
-    end = 0
-
-    def flush() -> None:
-        nonlocal buffer_length
-        if buffer:
-            chunks.append(ExtractedChunk(" ".join(buffer), line_start=start, line_end=end))
-            buffer.clear()
-            buffer_length = 0
-
-    for number, line in enumerate(lines, start=1):
-        normalized = re.sub(r"\s+", " ", line).strip()
-        if not normalized:
-            continue
-        if len(normalized) > 1200:
-            flush()
-            chunks.extend(ExtractedChunk(part, line_start=number, line_end=number) for part in _split_text(normalized))
-            continue
-        if buffer and buffer_length + 1 + len(normalized) > 1200:
-            flush()
-        if not buffer:
-            start = number
-        else:
-            buffer_length += 1
-        buffer.append(normalized)
-        buffer_length += len(normalized)
-        end = number
-    flush()
+    chunks = (
+        _extract_markdown_chunks(lines)
+        if file_type in {"md", "markdown"}
+        else _extract_line_chunks(list(enumerate(lines, start=1)))
+    )
     if not chunks:
         raise ValueError("Документ не содержит текста для индексирования")
     return chunks

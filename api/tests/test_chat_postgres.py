@@ -1,11 +1,13 @@
 import json
 import os
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
+from app import worker
 from app.chat import answer_question, generate_answer
 from app.config import Settings
 from app.kb import config_signature
@@ -44,6 +46,10 @@ def add_document(db, config, filename, text, embedding=None, *, stale=False):
         document_id=document.id, generation=1, chunk_index=0, text=text,
         line_start=1, line_end=1, embedding=embedding,
     ))
+
+
+def queue_document(db, filename, file_type, original):
+    db.add(Document(filename=filename, file_type=file_type, original=original, status="pending", generation=1))
 
 
 def test_postgres_demo_fts_and_current_index(postgres_chat_database, embeddings_server):
@@ -164,3 +170,53 @@ def test_postgres_pgvector_filters_dimension_and_similarity(postgres_chat_databa
     assert len(chat_requests) == 1
     context = json.loads(chat_requests[0][2]["messages"][1]["content"])
     assert context["sources"] == [{"id": "c1", "excerpt": "alpha mountain"}]
+
+
+def test_postgres_worker_indexes_real_examples_and_project_overview(postgres_chat_database):
+    config = Settings(database_url="sqlite+pysqlite://", kb_mode="demo")
+    repository = Path(__file__).resolve().parents[2]
+    with postgres_chat_database.begin() as db:
+        queue_document(db, "README.md", "md", (repository / "README.md").read_bytes())
+        queue_document(db, "lazur.txt", "txt", (repository / "examples/lazur.txt").read_bytes())
+
+    assert worker.process_one(postgres_chat_database, config)
+    assert worker.process_one(postgres_chat_database, config)
+    assert not worker.process_one(postgres_chat_database, config)
+
+    overview = generate_answer(postgres_chat_database, "  ПРО что проект?! ", [], config)
+    deadline = generate_answer(
+        postgres_chat_database, "Какой срок подачи заявки проекта Лазурь?", [], config,
+    )
+    unsupported = generate_answer(
+        postgres_chat_database, "Каков бюджет проекта Лазурь?", [], config,
+    )
+
+    assert overview.kind == "demo"
+    assert len(overview.sources) == 1
+    assert overview.sources[0].filename == "README.md"
+    assert overview.sources[0].line_start == 1
+    assert overview.sources[0].text.startswith("# UralDocs Внутренняя база знаний")
+    assert deadline.kind == "demo"
+    assert deadline.sources[0].filename == "lazur.txt"
+    assert "12 мая 2027 года" in deadline.sources[0].text
+    assert unsupported.kind == "insufficient"
+    assert unsupported.sources == ()
+
+
+def test_postgres_project_overview_falls_back_to_fts_for_stale_readme(postgres_chat_database):
+    config = Settings(database_url="sqlite+pysqlite://", kb_mode="demo")
+    repository = Path(__file__).resolve().parents[2]
+    with postgres_chat_database.begin() as db:
+        queue_document(db, "README.md", "md", (repository / "README.md").read_bytes())
+        queue_document(db, "project.txt", "txt", "Проект посвящён совместной работе с документами.".encode())
+
+    assert worker.process_one(postgres_chat_database, config)
+    assert worker.process_one(postgres_chat_database, config)
+    with postgres_chat_database.begin() as db:
+        readme = db.scalar(select(Document).where(Document.filename == "README.md"))
+        readme.config_signature = "stale"
+
+    result = generate_answer(postgres_chat_database, "Про что проект?", [], config)
+
+    assert result.kind == "demo"
+    assert [source.filename for source in result.sources] == ["project.txt"]
