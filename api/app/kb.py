@@ -9,7 +9,7 @@ from pypdf import PdfReader
 from app.config import Settings
 
 MAX_FLOAT32 = 3.4028234663852886e38
-INDEX_FORMAT_VERSION = 2
+INDEX_FORMAT_VERSION = 3
 CHUNK_CHAR_LIMIT = 1200
 
 

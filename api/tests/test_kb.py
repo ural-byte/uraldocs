@@ -97,8 +97,9 @@ def test_repository_readme_first_chunk_is_project_overview():
 
 def test_config_signature_includes_index_format_version(monkeypatch):
     config = Settings(database_url="sqlite+pysqlite://", kb_mode="demo")
+    assert kb.INDEX_FORMAT_VERSION == 3
     current = kb.config_signature(config)
 
-    monkeypatch.setattr(kb, "INDEX_FORMAT_VERSION", kb.INDEX_FORMAT_VERSION + 1)
+    monkeypatch.setattr(kb, "INDEX_FORMAT_VERSION", 2)
 
     assert kb.config_signature(config) != current
