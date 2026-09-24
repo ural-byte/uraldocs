@@ -21,19 +21,19 @@ def create_conversation(client, title="Вопросы"):
     return response.json()["id"]
 
 
-def ready_document(database, config, text="alpha mountain", vector=None):
+def ready_document(database, config, text="alpha mountain", vector=None, filename="guide.txt", line_start=4):
     if config.kb_mode == "real_ai" and vector is None:
         vector = [1.0, 0.0]
     with database() as db:
         document = Document(
-            filename="guide.txt", file_type="txt", original=text.encode(), status="ready", generation=1,
+            filename=filename, file_type="txt", original=text.encode(), status="ready", generation=1,
             config_signature=config_signature(config),
         )
         db.add(document)
         db.flush()
         chunk = DocumentChunk(
             document_id=document.id, generation=1, chunk_index=0, text=text,
-            line_start=4, line_end=4, embedding=vector,
+            line_start=line_start, line_end=line_start, embedding=vector,
         )
         db.add(chunk)
         db.commit()
@@ -82,6 +82,55 @@ def test_shared_answer_service_needs_no_web_user_or_conversation(database, embed
     with database() as db:
         assert db.scalars(select(Message)).all() == []
         assert db.scalars(select(Conversation)).all() == []
+
+
+def test_real_ai_project_overview_uses_only_current_readme_intro_without_query_embedding(
+    database, embeddings_server,
+):
+    config = real_config(embeddings_server)
+    ready_document(database, config, text="Unrelated operational notes")
+    readme_id = ready_document(
+        database,
+        config,
+        text="# UralDocs\n\nВнутренняя база знаний с ответами по документам.",
+        filename="README.md",
+        line_start=1,
+    )
+    with database() as db:
+        db.add(DocumentChunk(
+            document_id=readme_id,
+            generation=1,
+            chunk_index=1,
+            text="## Запуск\nСлужебные команды и настройки.",
+            line_start=4,
+            line_end=5,
+            embedding=[1.0, 0.0],
+        ))
+        db.commit()
+
+    def answer(_request):
+        return {"choices": [{"message": {"content": json.dumps({
+            "insufficient": False,
+            "answer": "UralDocs — внутренняя база знаний.",
+            "citation_ids": ["c1"],
+        }, ensure_ascii=False)}}]}
+
+    embeddings_server.payload = answer
+
+    result = chat.generate_answer(database, "  ПРО ЧТО ПРОЕКТ?! ", [], config)
+
+    assert result.kind == "answer"
+    assert result.text == "UralDocs — внутренняя база знаний."
+    assert len(result.sources) == 1
+    assert result.sources[0].filename == "README.md"
+    assert result.sources[0].line_start == 1
+    assert result.sources[0].citation_id == "c1"
+    assert [request[0] for request in embeddings_server.requests] == ["/v1/chat/completions"]
+    payload = json.loads(embeddings_server.requests[0][2]["messages"][1]["content"])
+    assert payload["sources"] == [{
+        "id": "c1",
+        "excerpt": "# UralDocs\n\nВнутренняя база знаний с ответами по документам.",
+    }]
 
 
 def test_shared_answer_service_localizes_service_states_without_web_user(database):

@@ -351,9 +351,15 @@ def generate_answer(factory: sessionmaker[Session], question: str,
                     language: Literal["ru", "en"] | None = None) -> AnswerResult:
     question = _validate_question(question, config)
     recent_history = history[-3:]
+    overview: Candidate | None = None
     with factory() as db:
         available = _index_available(db, config)
-        candidates = _demo_search(db, question, config) if available and config.kb_mode == "demo" else []
+        candidates = []
+        if available:
+            if config.kb_mode == "demo":
+                candidates = _demo_search(db, question, config)
+            elif _normalized_intent(question) == PROJECT_OVERVIEW_INTENT:
+                overview = _project_overview(db, config)
 
     if not available:
         return AnswerResult("index_unavailable", _service_text("index_unavailable", language))
@@ -361,6 +367,11 @@ def generate_answer(factory: sessionmaker[Session], question: str,
         return AnswerResult("demo", _service_text("demo", language), tuple(candidates)) if candidates else AnswerResult("insufficient", _service_text("insufficient", language))
     if not config.ai_chat_model:
         raise ChatError(503, "AI_CHAT_MODEL не настроена")
+    if overview is not None:
+        return (
+            _chat_completion(question, recent_history, [overview], config)
+            if language is None else _chat_completion(question, recent_history, [overview], config, language)
+        )
     try:
         vector = create_embeddings([ExtractedChunk(question)], config)[0]
     except ValueError as exc:
