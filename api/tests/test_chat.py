@@ -119,6 +119,34 @@ def test_shared_answer_service_requests_english_without_changing_web_default(dat
     assert "in English" in embeddings_server.requests[-1][2]["messages"][0]["content"]
 
 
+@pytest.mark.parametrize("content", [
+    '{"insufficient":false,"answer":"На горе есть маршрут.","citation_ids":["c1"]}',
+    '```\n{"insufficient":false,"answer":"На горе есть маршрут.","citation_ids":["c1"]}\n```',
+    '```json\n{"insufficient":false,"answer":"На горе есть маршрут.","citation_ids":["c1"]}\n```',
+])
+def test_real_ai_accepts_raw_or_single_fenced_json(
+    client, database, users, embeddings_server, monkeypatch, content,
+):
+    config = real_config(embeddings_server)
+    monkeypatch.setattr(api_main, "settings", config)
+    ready_document(database, config)
+    login(client)
+    conversation_id = create_conversation(client)
+
+    def answer(_request):
+        if embeddings_server.requests[-1][0].endswith("/embeddings"):
+            return {"data": [{"index": 0, "embedding": [1.0, 0.0]}]}
+        return {"choices": [{"message": {"content": content}}]}
+
+    embeddings_server.payload = answer
+
+    response = client.post(f"/conversations/{conversation_id}/messages", json={"question": "alpha"}, headers=ORIGIN)
+
+    assert response.status_code == 201
+    assert response.json()["assistant"]["text"] == "На горе есть маршрут."
+    assert len(client.get(f"/conversations/{conversation_id}").json()["messages"]) == 2
+
+
 def test_demo_history_isolation_and_source_deletion(client, database, users):
     config = Settings(database_url="sqlite+pysqlite://", kb_mode="demo")
     document_id = ready_document(database, config)
@@ -265,6 +293,8 @@ def test_chat_body_limit_accepts_maximum_russian_question(client, database, user
     {"insufficient": False, "answer": "Без ссылки", "citation_ids": []},
     {"insufficient": False, "answer": "Ссылка [c99]", "citation_ids": ["c1"]},
     "invalid-json",
+    'Ответ:\n```json\n{"insufficient":false,"answer":"На горе есть маршрут.","citation_ids":["c1"]}\n```',
+    '```python\n{"insufficient":false,"answer":"На горе есть маршрут.","citation_ids":["c1"]}\n```',
 ])
 def test_real_ai_rejects_invalid_output_without_pair(client, database, users, embeddings_server, monkeypatch, reply):
     config = real_config(embeddings_server)
@@ -281,6 +311,29 @@ def test_real_ai_rejects_invalid_output_without_pair(client, database, users, em
 
     embeddings_server.payload = answer
     response = client.post(f"/conversations/{conversation_id}/messages", json={"question": "alpha"}, headers=ORIGIN)
+    assert response.status_code == 502
+    assert client.get(f"/conversations/{conversation_id}").json()["messages"] == []
+
+
+@pytest.mark.parametrize("content", [None, {"insufficient": True, "citation_ids": []}, ["invalid"]])
+def test_real_ai_rejects_non_string_content_without_pair(
+    client, database, users, embeddings_server, monkeypatch, content,
+):
+    config = real_config(embeddings_server)
+    monkeypatch.setattr(api_main, "settings", config)
+    ready_document(database, config)
+    login(client)
+    conversation_id = create_conversation(client)
+
+    def answer(_request):
+        if embeddings_server.requests[-1][0].endswith("/embeddings"):
+            return {"data": [{"index": 0, "embedding": [1.0, 0.0]}]}
+        return {"choices": [{"message": {"content": content}}]}
+
+    embeddings_server.payload = answer
+
+    response = client.post(f"/conversations/{conversation_id}/messages", json={"question": "alpha"}, headers=ORIGIN)
+
     assert response.status_code == 502
     assert client.get(f"/conversations/{conversation_id}").json()["messages"] == []
 

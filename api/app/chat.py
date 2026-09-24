@@ -21,6 +21,7 @@ EN_INSUFFICIENT_TEXT = "The knowledge base does not contain enough information t
 EN_INDEX_UNAVAILABLE_TEXT = "The document index is unavailable for the current configuration."
 EN_DEMO_TEXT = "Demo mode: no AI answer is generated. Matching excerpts are shown below."
 PROJECT_OVERVIEW_INTENT = "про что проект"
+JSON_FENCE_RE = re.compile(r"```(?:json)?[ \t]*\r?\n(?P<body>.*?)\r?\n```", re.IGNORECASE | re.DOTALL)
 
 
 def _service_text(kind: Literal["demo", "insufficient", "index_unavailable"], language: Literal["ru", "en"] | None) -> str:
@@ -37,6 +38,16 @@ class ChatError(Exception):
         self.status_code = status_code
         self.detail = detail
         super().__init__(detail)
+
+
+def _parse_completion_content(content: object) -> object:
+    if not isinstance(content, str):
+        raise TypeError("completion content is not a string")
+    stripped = content.strip()
+    match = JSON_FENCE_RE.fullmatch(stripped)
+    if match is not None:
+        stripped = match.group("body").strip()
+    return json.loads(stripped)
 
 
 @dataclass(frozen=True)
@@ -257,7 +268,7 @@ def _chat_completion(question: str, history: Sequence[HistoryPair], candidates: 
     try:
         envelope = response.json()
         content = envelope["choices"][0]["message"]["content"]
-        result = json.loads(content)
+        result = _parse_completion_content(content)
     except (ValueError, TypeError, KeyError, IndexError) as exc:
         raise ChatError(502, "API генерации вернул некорректный ответ") from exc
     if not isinstance(result, dict) or type(result.get("insufficient")) is not bool:

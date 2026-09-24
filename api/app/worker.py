@@ -16,6 +16,12 @@ logger = logging.getLogger("uraldocs.worker")
 EMBEDDINGS_BATCH_SIZE = 64
 
 
+class _EmbeddingsHTTPError(ValueError):
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__(f"API embeddings вернул HTTP {status_code}")
+
+
 def _request_embeddings(client: httpx.Client, chunks: list[ExtractedChunk], config: Settings) -> list[list[float]]:
     try:
         response = client.post(
@@ -29,7 +35,7 @@ def _request_embeddings(client: httpx.Client, chunks: list[ExtractedChunk], conf
         raise ValueError("Не удалось связаться с API embeddings") from exc
 
     if response.status_code != 200:
-        raise ValueError(f"API embeddings вернул HTTP {response.status_code}")
+        raise _EmbeddingsHTTPError(response.status_code)
     try:
         payload = response.json()
     except ValueError as exc:
@@ -54,14 +60,33 @@ def _request_embeddings(client: httpx.Client, chunks: list[ExtractedChunk], conf
     return validate_embeddings([vectors_by_index[index] for index in range(len(chunks))], len(chunks))
 
 
+def _extend_embeddings(vectors: list[list[float]], batch_vectors: list[list[float]]) -> None:
+    if vectors and len(batch_vectors[0]) != len(vectors[0]):
+        raise ValueError("Размерности embeddings различаются")
+    vectors.extend(batch_vectors)
+
+
 def create_embeddings(chunks: list[ExtractedChunk], config: Settings) -> list[list[float]]:
     vectors: list[list[float]] = []
+    singleton_only = False
     with httpx.Client(timeout=config.ai_timeout_seconds, follow_redirects=False, trust_env=False) as client:
         for start in range(0, len(chunks), EMBEDDINGS_BATCH_SIZE):
-            batch_vectors = _request_embeddings(client, chunks[start:start + EMBEDDINGS_BATCH_SIZE], config)
-            if vectors and len(batch_vectors[0]) != len(vectors[0]):
-                raise ValueError("Размерности embeddings различаются")
-            vectors.extend(batch_vectors)
+            batch = chunks[start:start + EMBEDDINGS_BATCH_SIZE]
+            if singleton_only:
+                for chunk in batch:
+                    _extend_embeddings(vectors, _request_embeddings(client, [chunk], config))
+                continue
+            try:
+                batch_vectors = _request_embeddings(client, batch, config)
+            except _EmbeddingsHTTPError as exc:
+                if exc.status_code != 400 or len(batch) == 1:
+                    raise
+                _extend_embeddings(vectors, _request_embeddings(client, batch[:1], config))
+                singleton_only = True
+                for chunk in batch[1:]:
+                    _extend_embeddings(vectors, _request_embeddings(client, [chunk], config))
+            else:
+                _extend_embeddings(vectors, batch_vectors)
     return vectors
 
 
