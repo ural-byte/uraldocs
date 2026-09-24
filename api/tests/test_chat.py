@@ -79,6 +79,9 @@ def test_shared_answer_service_needs_no_web_user_or_conversation(database, embed
         {"question": f"вопрос {index}", "answer": f"ответ {index}"} for index in range(1, 4)
     ]
     assert payload["sources"] == [{"id": "c1", "excerpt": "alpha mountain"}]
+    system_prompt = embeddings_server.requests[-1][2]["messages"][0]["content"]
+    assert "Если содержит, обязательно верни insufficient=false" in system_prompt
+    assert "нельзя возвращать insufficient=true, когда ответ явно есть в sources" in system_prompt
     with database() as db:
         assert db.scalars(select(Message)).all() == []
         assert db.scalars(select(Conversation)).all() == []
@@ -165,7 +168,10 @@ def test_shared_answer_service_requests_english_without_changing_web_default(dat
     result = chat.generate_answer(database, "alpha", [], config, language="en")
 
     assert result.kind == "answer" and result.text == "There is a mountain route."
-    assert "in English" in embeddings_server.requests[-1][2]["messages"][0]["content"]
+    system_prompt = embeddings_server.requests[-1][2]["messages"][0]["content"]
+    assert "in English" in system_prompt
+    assert "If it does, you must return insufficient=false" in system_prompt
+    assert "never return insufficient=true when sources explicitly contain the answer" in system_prompt
 
 
 @pytest.mark.parametrize("content", [

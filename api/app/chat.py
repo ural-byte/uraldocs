@@ -231,12 +231,16 @@ def _chat_completion(question: str, history: Sequence[HistoryPair], candidates: 
     ]
     system = (
         "Answer the current question in English using only excerpts in sources. History helps interpret the question "
-        "but is not evidence. Return only JSON: "
+        "but is not evidence. First check whether at least one source excerpt directly answers the question. "
+        "If it does, you must return insufficient=false; never return insufficient=true when sources explicitly "
+        "contain the answer. Return only JSON: "
         '{"insufficient":false,"answer":"text","citation_ids":["c1"]} '
         'or {"insufficient":true,"citation_ids":[]}. Do not cite IDs outside sources.'
         if language == "en" else
         "Ответь на текущий вопрос только по выдержкам sources. История помогает понять контекст, "
-        "но не служит источником фактов. Верни только JSON: "
+        "но не служит источником фактов. Сначала проверь, содержит ли хотя бы одна выдержка прямой ответ. "
+        "Если содержит, обязательно верни insufficient=false; нельзя возвращать insufficient=true, когда ответ явно есть в sources. "
+        "Верни только JSON: "
         '{"insufficient":false,"answer":"текст","citation_ids":["c1"]} '
         'или {"insufficient":true,"citation_ids":[]}. '
         "Не ссылайся на ID вне sources."
